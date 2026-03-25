@@ -111,48 +111,6 @@ print(caps.is_network_blocked)  # True
 Network is **allowed by default**. Call `block_network()` to restrict it.
 </Note>
 
----
-
-### allow_command
-
-```python
-allow_command(cmd: str) -> None
-```
-
-Add a command to the allow list. Commands on the allow list override the block list.
-
-<ParamField path="cmd" type="str" required>
-  Command name to allow (e.g., `"git"`, `"python"`).
-</ParamField>
-
-```python
-caps = CapabilitySet()
-caps.allow_command("git")
-caps.allow_command("python")
-```
-
----
-
-### block_command
-
-```python
-block_command(cmd: str) -> None
-```
-
-Add a command to the block list. Blocked commands are denied unless also on the allow list.
-
-<ParamField path="cmd" type="str" required>
-  Command name to block (e.g., `"rm"`, `"curl"`).
-</ParamField>
-
-```python
-caps = CapabilitySet()
-caps.block_command("rm")
-caps.block_command("curl")
-```
-
----
-
 ### platform_rule
 
 ```python

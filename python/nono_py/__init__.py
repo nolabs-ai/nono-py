@@ -32,13 +32,20 @@ from nono_py._nono_py import (
     CapabilitySource,
     ExecResult,
     FsCapability,
+    Policy,
     QueryContext,
+    ResolvedPolicy,
     SandboxState,
     SupportInfo,
     apply,
+    apply_unlink_overrides,
+    embedded_policy_json,
     is_supported,
+    load_embedded_policy,
+    load_policy,
     sandboxed_exec,
     support_info,
+    validate_deny_overlaps,
 )
 
 __all__ = [
@@ -47,13 +54,20 @@ __all__ = [
     "CapabilitySource",
     "ExecResult",
     "FsCapability",
+    "Policy",
     "QueryContext",
+    "ResolvedPolicy",
     "SandboxState",
     "SupportInfo",
     "apply",
+    "apply_unlink_overrides",
+    "embedded_policy_json",
     "is_supported",
+    "load_embedded_policy",
+    "load_policy",
     "sandboxed_exec",
     "support_info",
+    "validate_deny_overlaps",
 ]
 
 __version__ = "0.1.0"

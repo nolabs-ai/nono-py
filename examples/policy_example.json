@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "version": 3,
+    "schema_version": "3.0"
+  },
+  "groups": {
+    "system_tmp_read": {
+      "description": "Allow read-only access to /tmp",
+      "allow": {
+        "read": [
+          "/tmp"
+        ]
+      }
+    },
+    "project_rw": {
+      "description": "Example project path grant; replace with a real path before using",
+      "allow": {
+        "readwrite": [
+          "/path/to/project"
+        ]
+      }
+    },
+    "deny_secrets": {
+      "description": "Block common secret directories",
+      "deny": {
+        "access": [
+          "~/.ssh",
+          "~/.aws"
+        ]
+      }
+    }
+  }
+}

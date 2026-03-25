@@ -1,0 +1,759 @@
+{
+  "meta": {
+    "version": 3,
+    "schema_version": "3.0"
+  },
+  "groups": {
+    "deny_credentials": {
+      "description": "Block access to cryptographic keys, tokens, and cloud credentials",
+      "required": true,
+      "deny": {
+        "access": [
+          "~/.ssh",
+          "~/.gnupg",
+          "~/.aws",
+          "~/.azure",
+          "~/.config/gcloud",
+          "~/.gcloud",
+          "~/.kube",
+          "~/.docker",
+          "~/.git-credentials",
+          "~/.netrc",
+          "~/.npmrc",
+          "~/.vault-token",
+          "~/.credentials",
+          "~/.secrets",
+          "~/.keys",
+          "~/.pki",
+          "~/.terraform.d",
+          "~/.config/op"
+        ]
+      }
+    },
+    "deny_keychains_macos": {
+      "description": "Block access to macOS keychains and password stores",
+      "required": true,
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Keychains",
+          "/Library/Keychains",
+          "~/.password-store",
+          "~/.1password",
+          "~/Library/Group Containers/2BUA8C4S2C.com.1password",
+          "~/Library/Application Support/1Password",
+          "~/Library/Containers/com.1password.1password"
+        ]
+      }
+    },
+    "deny_keychains_linux": {
+      "description": "Block access to Linux keyrings and password stores",
+      "required": true,
+      "platform": "linux",
+      "deny": {
+        "access": [
+          "~/.password-store",
+          "~/.1password",
+          "~/.op",
+          "~/.local/share/keyrings"
+        ]
+      }
+    },
+    "deny_browser_data_macos": {
+      "description": "Block access to macOS browser stored data (cookies, saved passwords, sessions)",
+      "required": true,
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Application Support/Google/Chrome",
+          "~/Library/Application Support/Firefox",
+          "~/Library/Application Support/Microsoft Edge",
+          "~/Library/Application Support/Arc",
+          "~/Library/Application Support/Brave Browser",
+          "~/Library/Safari"
+        ]
+      }
+    },
+    "deny_browser_data_linux": {
+      "description": "Block access to Linux browser stored data (cookies, saved passwords, sessions)",
+      "required": true,
+      "platform": "linux",
+      "deny": {
+        "access": [
+          "~/.config/google-chrome",
+          "~/.config/chromium",
+          "~/.mozilla/firefox",
+          "~/.config/microsoft-edge",
+          "~/.config/BraveSoftware"
+        ]
+      }
+    },
+    "deny_macos_private": {
+      "description": "Block access to macOS private data (messages, mail, cookies)",
+      "required": true,
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Messages",
+          "~/Library/Mail",
+          "~/Library/Cookies",
+          "~/Library/Containers/com.apple.Safari",
+          "~/Library/Application Support/MobileSync"
+        ]
+      }
+    },
+    "deny_shell_history": {
+      "description": "Block access to shell command history files",
+      "required": true,
+      "deny": {
+        "access": [
+          "~/.bash_history",
+          "~/.zsh_history",
+          "~/.history",
+          "~/.python_history"
+        ]
+      }
+    },
+    "deny_shell_configs": {
+      "description": "Block access to shell configuration files that may embed secrets",
+      "required": true,
+      "deny": {
+        "access": [
+          "~/.zshrc",
+          "~/.zprofile",
+          "~/.zshenv",
+          "~/.zlogin",
+          "~/.zlogout",
+          "~/.bashrc",
+          "~/.bash_profile",
+          "~/.bash_login",
+          "~/.bash_logout",
+          "~/.profile",
+          "~/.config/fish",
+          "~/.env",
+          "~/.envrc"
+        ]
+      }
+    },
+    "system_read_macos": {
+      "description": "macOS system paths required for executables to function",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "/bin",
+          "/sbin",
+          "/usr/bin",
+          "/usr/sbin",
+          "/usr/local/bin",
+          "/usr/lib",
+          "/usr/local/lib",
+          "/usr/share",
+          "/System/Library",
+          "/Library",
+          "/Library/Frameworks",
+          "/dev",
+          "/private/var/db/dyld",
+          "/var/db/dyld",
+          "/var/db",
+          "/private/etc/ssl",
+          "/etc/ssl",
+          "/etc",
+          "/private/etc",
+          "/usr/share/zoneinfo",
+          "/usr/share/locale",
+          "/var/db/timezone",
+          "/usr/share/terminfo",
+          "/var",
+          "/private/var",
+          "/private",
+          "/tmp",
+          "/System/Volumes",
+          "/System/Cryptexes",
+          "/Applications",
+          "/cores",
+          "/opt",
+          "/Volumes",
+          "/run",
+          "/nix"
+        ]
+      },
+      "symlink_pairs": {
+        "/etc": "/private/etc",
+        "/var": "/private/var",
+        "/tmp": "/private/tmp"
+      }
+    },
+    "system_read_linux": {
+      "description": "Linux system paths required for executables to function",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "/bin",
+          "/sbin",
+          "/usr/bin",
+          "/usr/sbin",
+          "/usr/local/bin",
+          "/lib",
+          "/lib64",
+          "/lib/x86_64-linux-gnu",
+          "/lib/aarch64-linux-gnu",
+          "/usr/lib",
+          "/usr/lib64",
+          "/usr/lib/x86_64-linux-gnu",
+          "/usr/lib/aarch64-linux-gnu",
+          "/usr/local/lib",
+          "/usr/local/lib64",
+          "/etc/resolv.conf",
+          "/etc/hosts",
+          "/etc/nsswitch.conf",
+          "/etc/gai.conf",
+          "/etc/ssl",
+          "/etc/ca-certificates",
+          "/etc/ld.so.cache",
+          "/etc/ld.so.conf",
+          "/etc/ld.so.conf.d",
+          "/etc/localtime",
+          "/etc/timezone",
+          "/etc/locale.conf",
+          "/etc/locale.gen",
+          "/etc/alternatives",
+          "/etc/os-release",
+          "/etc/services",
+          "/usr/share",
+          "/usr/share/locale",
+          "/usr/share/locale-langpack",
+          "/usr/share/zoneinfo",
+          "/usr/share/terminfo",
+          "/usr/share/ca-certificates",
+          "/lib/terminfo",
+          "/etc/terminfo",
+          "/dev/null",
+          "/dev/zero",
+          "/dev/random",
+          "/dev/urandom",
+          "/dev/full",
+          "/dev/tty",
+          "/dev/console",
+          "/dev/stdin",
+          "/dev/stdout",
+          "/dev/stderr",
+          "/dev/fd",
+          "/dev/pts",
+          "/proc/self",
+          "/proc/cpuinfo",
+          "/proc/meminfo",
+          "/proc/stat",
+          "/proc/loadavg",
+          "/proc/version",
+          "/proc/filesystems",
+          "/sys",
+          "/run",
+          "/var/run",
+          "/tmp",
+          "/nix"
+        ]
+      }
+    },
+    "system_write_macos": {
+      "description": "macOS paths requiring write for temp files and devices",
+      "platform": "macos",
+      "allow": {
+        "write": [
+          "/private/tmp",
+          "/tmp",
+          "/private/var/folders",
+          "/var/folders",
+          "/dev",
+          "$TMPDIR"
+        ]
+      }
+    },
+    "system_write_linux": {
+      "description": "Linux paths requiring write for temp files and devices",
+      "platform": "linux",
+      "allow": {
+        "write": [
+          "/tmp",
+          "/dev/null",
+          "/dev/zero",
+          "/dev/full",
+          "/dev/tty",
+          "/dev/stdout",
+          "/dev/stderr",
+          "/dev/fd",
+          "/dev/pts",
+          "/proc/self/fd",
+          "$TMPDIR"
+        ]
+      }
+    },
+    "user_caches_macos": {
+      "description": "User cache, log, and preference directories for macOS programs",
+      "platform": "macos",
+      "allow": {
+        "readwrite": [
+          "~/Library/Caches",
+          "~/Library/Logs"
+        ],
+        "read": [
+          "~/Library/Preferences"
+        ]
+      }
+    },
+    "user_caches_linux": {
+      "description": "User cache and log directories for Linux programs (XDG)",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "~/.cache"
+        ],
+        "read": [
+          "~/.local/state"
+        ]
+      }
+    },
+    "claude_cache_linux": {
+      "description": "Claude Code CLI cache and MCP log directories on Linux",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "~/.cache/claude-cli-nodejs"
+        ]
+      }
+    },
+    "user_tools": {
+      "description": "User-local executables, .desktop files, man pages, and shell completions",
+      "allow": {
+        "read": [
+          "~/.local/bin",
+          "~/.local/share/applications",
+          "~/.local/share/man",
+          "~/.local/share/bash-completion",
+          "~/.local/share/zsh"
+        ],
+        "readwrite": [
+          "~/.local/state"
+        ]
+      }
+    },
+    "node_runtime": {
+      "description": "Node.js runtime and package manager paths",
+      "allow": {
+        "read": [
+          "~/.nvm",
+          "~/.fnm",
+          "~/.npm",
+          "~/.node",
+          "~/.local/share/fnm",
+          "/usr/local/lib/node_modules",
+          "~/Library/pnpm",
+          "~/.local/share/pnpm"
+        ]
+      }
+    },
+    "opencode_linux": {
+      "description": "OpenCode binary directory (Landlock requires directory read to execute binaries)",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "~/.opencode/bin"
+        ]
+      }
+    },
+    "python_runtime": {
+      "description": "Python runtime paths (pyenv, conda, uv)",
+      "allow": {
+        "read": [
+          "~/.pyenv",
+          "~/.local/lib",
+          "~/.local/share/uv",
+          "~/.conda"
+        ]
+      }
+    },
+    "rust_runtime": {
+      "description": "Rust toolchain paths",
+      "allow": {
+        "read": [
+          "~/.cargo",
+          "~/.rustup"
+        ]
+      }
+    },
+    "go_runtime": {
+      "description": "Go toolchain paths",
+      "allow": {
+        "read": [
+          "~/go",
+          "/usr/local/go"
+        ]
+      }
+    },
+    "homebrew": {
+      "description": "Homebrew installation paths",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "/opt/homebrew",
+          "/usr/local/Cellar",
+          "/usr/local/opt"
+        ]
+      }
+    },
+    "claude_code_macos": {
+      "description": "Claude Code macOS-specific state and credential paths",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "$HOME/Library/Keychains/login.keychain-db"
+        ]
+      }
+    },
+    "claude_code_linux": {
+      "description": "Claude Code Linux-specific state paths",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "$HOME/.local/share/claude"
+        ]
+      }
+    },
+    "codex_macos": {
+      "description": "Codex macOS-specific state and credential paths",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "$HOME/Library/Keychains/login.keychain-db"
+        ]
+      }
+    },
+    "vscode_macos": {
+      "description": "Visual Studio Code configuration and extension directories for macOS",
+      "platform": "macos",
+      "allow": {
+        "readwrite": [
+          "$HOME/.vscode",
+          "$HOME/Library/Application Support/Code"
+        ]
+      }
+    },
+    "vscode_linux": {
+      "description": "Visual Studio Code configuration and extension directories for Linux",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "$HOME/.vscode",
+          "$HOME/.config/Code"
+        ]
+      }
+    },
+    "nix_runtime": {
+      "description": "Nix package manager runtime paths",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "~/.nix-profile",
+          "~/.nix-defexpr",
+          "/run/current-system/sw",
+          "/etc/profiles/per-user",
+          "/nix/var/nix/profiles"
+        ]
+      }
+    },
+    "git_config": {
+      "description": "Read access to git configuration files",
+      "allow": {
+        "read": [
+          "$HOME/.gitconfig",
+          "$HOME/.gitignore_global",
+          "$HOME/.config/git/ignore"
+        ]
+      }
+    },
+    "unlink_protection": {
+      "description": "Block file deletion globally, override for user-writable paths",
+      "deny": {
+        "unlink": true,
+        "unlink_override_for_user_writable": true
+      }
+    }
+  },
+  "profiles": {
+    "default": {
+      "meta": {
+        "name": "default",
+        "version": "1.0.0",
+        "description": "Default conservative base profile",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "deny_credentials",
+          "deny_keychains_macos",
+          "deny_keychains_linux",
+          "deny_browser_data_macos",
+          "deny_browser_data_linux",
+          "deny_macos_private",
+          "deny_shell_history",
+          "deny_shell_configs",
+          "system_read_macos",
+          "system_read_linux",
+          "system_write_macos",
+          "system_write_linux",
+          "user_tools",
+          "homebrew"
+        ],
+        "signal_mode": "isolated"
+      },
+      "filesystem": {},
+      "network": { "block": false },
+      "workdir": { "access": "none" },
+      "interactive": false
+    },
+    "claude-code": {
+      "extends": "default",
+      "meta": {
+        "name": "claude-code",
+        "version": "1.0.0",
+        "description": "Anthropic Claude Code CLI agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "claude_code_macos",
+          "claude_code_linux",
+          "user_caches_macos",
+          "claude_cache_linux",
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "vscode_macos",
+          "vscode_linux",
+          "nix_runtime",
+          "git_config",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "filesystem": {
+        "allow": ["$HOME/.claude"],
+        "allow_file": ["$HOME/.claude.json", "$HOME/.claude.json.lock"]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "open_urls": {
+        "allow_origins": [
+          "https://claude.ai"
+        ],
+        "allow_localhost": true
+      },
+      "allow_launch_services": true,
+      "hooks": {
+        "claude-code": {
+          "event": "PostToolUseFailure",
+          "matcher": "Read|Write|Edit|Bash",
+          "script": "nono-hook.sh"
+        }
+      },
+      "undo": {
+        "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
+        "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
+      },
+      "interactive": true
+    },
+    "codex": {
+      "extends": "default",
+      "meta": {
+        "name": "codex",
+        "version": "1.0.0",
+        "description": "OpenAI Codex CLI agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "codex_macos",
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "nix_runtime",
+          "git_config",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "filesystem": {
+        "allow": ["$HOME/.codex"]
+      },
+      "open_urls": {
+        "allow_origins": [
+          "https://auth.openai.com"
+        ],
+        "allow_localhost": true
+      },
+      "allow_launch_services": true,
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": true
+    },
+    "openclaw": {
+      "extends": "default",
+      "meta": {
+        "name": "openclaw",
+        "version": "1.0.0",
+        "description": "OpenClaw messaging gateway",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["node_runtime"],
+        "signal_mode": "isolated"
+      },
+      "filesystem": {
+        "allow": [
+          "$HOME/.openclaw",
+          "$HOME/.config/openclaw",
+          "$HOME/.local",
+          "$TMPDIR/openclaw-$UID"
+        ]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "read" },
+      "undo": {
+        "exclude_patterns": ["node_modules", ".next"]
+      },
+      "interactive": false
+    },
+    "opencode": {
+      "extends": "default",
+      "meta": {
+        "name": "opencode",
+        "version": "1.0.0",
+        "description": "OpenCode AI coding assistant",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "git_config", "unlink_protection"],
+        "signal_mode": "isolated"
+      },
+      "filesystem": {
+        "allow": [
+          "$HOME/.opencode",
+          "$HOME/.config/opencode",
+          "$HOME/.cache/opencode",
+          "$HOME/.local/share/opencode",
+          "$HOME/.local/share/opentui"
+        ]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "undo": {
+        "exclude_patterns": ["node_modules", ".next"]
+      },
+      "interactive": true
+    },
+    "python-dev": {
+      "extends": "default",
+      "meta": {
+        "name": "python-dev",
+        "version": "1.0.0",
+        "description": "Python SDK development profile with pyenv, conda, and pip support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["python_runtime"],
+        "signal_mode": "isolated",
+        "ipc_mode": "full"
+      },
+      "filesystem": {},
+      "network": { "block": false, "network_profile": "developer" },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "node-dev": {
+      "extends": "default",
+      "meta": {
+        "name": "node-dev",
+        "version": "1.0.0",
+        "description": "Node.js SDK development profile with nvm, fnm, pnpm, and npm support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["node_runtime"],
+        "signal_mode": "isolated"
+      },
+      "filesystem": {},
+      "network": { "block": false, "network_profile": "developer" },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "go-dev": {
+      "extends": "default",
+      "meta": {
+        "name": "go-dev",
+        "version": "1.0.0",
+        "description": "Go SDK development profile with GOPATH and module support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["go_runtime"],
+        "signal_mode": "isolated"
+      },
+      "filesystem": {},
+      "network": { "block": false, "network_profile": "developer" },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "rust-dev": {
+      "extends": "default",
+      "meta": {
+        "name": "rust-dev",
+        "version": "1.0.0",
+        "description": "Rust SDK development profile with cargo and rustup support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["rust_runtime"],
+        "signal_mode": "isolated"
+      },
+      "filesystem": {},
+      "network": { "block": false, "network_profile": "developer" },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "swival": {
+      "extends": "default",
+      "meta": {
+        "name": "swival",
+        "version": "1.0.0",
+        "description": "Swival CLI coding agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "python_runtime",
+          "node_runtime",
+          "user_caches_macos",
+          "user_caches_linux",
+          "git_config",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "filesystem": {
+        "allow": [
+          "$HOME/.config/swival",
+          "$HOME/.local/share/swival"
+        ]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "undo": {
+        "exclude_patterns": ["node_modules", "__pycache__", ".swival"],
+        "exclude_globs": ["*.pyc"]
+      },
+      "interactive": true
+    }
+  }
+}

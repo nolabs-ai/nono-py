@@ -104,14 +104,6 @@ class CapabilitySet:
         """Block all outbound network access."""
         ...
 
-    def allow_command(self, cmd: str) -> None:
-        """Add a command to the allow list."""
-        ...
-
-    def block_command(self, cmd: str) -> None:
-        """Add a command to the block list."""
-        ...
-
     def platform_rule(self, rule: str) -> None:
         """Add a raw platform-specific sandbox rule.
 
@@ -142,6 +134,51 @@ class CapabilitySet:
 
     def summary(self) -> str:
         """Get a plain-text summary of the capability set."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+class Policy:
+    """Parsed policy.json document."""
+
+    def group_names(self) -> list[str]:
+        """Return all policy group names in sorted order."""
+        ...
+
+    def group_description(self, name: str) -> str | None:
+        """Return a group's description if it exists."""
+        ...
+
+    def resolve_groups(self, group_names: list[str], caps: CapabilitySet) -> ResolvedPolicy:
+        """Resolve named policy groups into a capability set."""
+        ...
+
+    def resolve_deny_paths(self, group_names: list[str]) -> list[str]:
+        """Resolve deny.access paths for the given groups."""
+        ...
+
+    def validate_group_exclusions(self, excluded_groups: list[str]) -> None:
+        """Reject exclusions that target required groups."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+class ResolvedPolicy:
+    """Details returned from policy group resolution."""
+
+    @property
+    def names(self) -> list[str]:
+        """Resolved group names after platform filtering."""
+        ...
+
+    @property
+    def needs_unlink_overrides(self) -> bool:
+        """Whether unlink overrides should be applied after final path grants."""
+        ...
+
+    @property
+    def deny_paths(self) -> list[str]:
+        """Expanded deny.access paths gathered during resolution."""
         ...
 
     def __repr__(self) -> str: ...
@@ -302,6 +339,14 @@ def apply(caps: CapabilitySet) -> None:
     """
     ...
 
+def apply_unlink_overrides(caps: CapabilitySet) -> None:
+    """Apply post-resolution unlink overrides for writable paths."""
+    ...
+
+def embedded_policy_json() -> str:
+    """Return the raw embedded policy.json string."""
+    ...
+
 def is_supported() -> bool:
     """Check if sandboxing is supported on this platform.
 
@@ -310,10 +355,22 @@ def is_supported() -> bool:
     """
     ...
 
+def load_embedded_policy() -> Policy:
+    """Load the embedded policy bundled with this package."""
+    ...
+
+def load_policy(json: str) -> Policy:
+    """Parse a policy.json document."""
+    ...
+
 def support_info() -> SupportInfo:
     """Get detailed information about sandbox support on this platform.
 
     Returns:
         SupportInfo object with platform details
     """
+    ...
+
+def validate_deny_overlaps(deny_paths: list[str], caps: CapabilitySet) -> None:
+    """Validate deny.access paths against the final capability set."""
     ...

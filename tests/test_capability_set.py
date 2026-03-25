@@ -3,7 +3,7 @@
 import os
 import tempfile
 
-import pytest  # noqa: F401v0.6.0
+import pytest
 
 from nono_py import AccessMode, CapabilitySet
 
@@ -129,24 +129,6 @@ class TestCapabilitySetNetwork:
         caps = CapabilitySet()
         caps.block_network()
         assert "network=blocked" in repr(caps)
-
-
-class TestCapabilitySetCommands:
-    """Tests for command allow/block lists."""
-
-    def test_allow_command(self) -> None:
-        """Test adding command to allow list."""
-        caps = CapabilitySet()
-        caps.allow_command("git")
-        # No direct accessor, but shouldn't raise
-        assert True
-
-    def test_block_command(self) -> None:
-        """Test adding command to block list."""
-        caps = CapabilitySet()
-        caps.block_command("rm")
-        # No direct accessor, but shouldn't raise
-        assert True
 
 
 class TestCapabilitySetDeduplicate:

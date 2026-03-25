@@ -14,6 +14,7 @@ use pyo3::exceptions::{
 use pyo3::prelude::*;
 use std::path::Path;
 
+mod policy;
 mod sandboxed_exec;
 
 // ---------------------------------------------------------------------------
@@ -225,8 +226,8 @@ impl FsCapability {
 /// A collection of capabilities that define sandbox permissions.
 ///
 /// Use this class to build up the set of permissions that will be granted
-/// when the sandbox is applied. Capabilities include filesystem access,
-/// network access control, and command filtering.
+/// when the sandbox is applied. Capabilities include filesystem access
+/// and network access control.
 ///
 /// Example:
 ///     >>> caps = CapabilitySet()
@@ -291,26 +292,6 @@ impl CapabilitySet {
     /// Once applied, the sandboxed process cannot make any network connections.
     fn block_network(&mut self) {
         self.inner.set_network_blocked(true);
-    }
-
-    /// Add a command to the allow list.
-    ///
-    /// Commands on the allow list override the block list.
-    ///
-    /// Args:
-    ///     cmd: Command name to allow
-    fn allow_command(&mut self, cmd: &str) {
-        self.inner.add_allowed_command(cmd);
-    }
-
-    /// Add a command to the block list.
-    ///
-    /// Blocked commands will be denied unless also on the allow list.
-    ///
-    /// Args:
-    ///     cmd: Command name to block
-    fn block_command(&mut self, cmd: &str) {
-        self.inner.add_blocked_command(cmd);
     }
 
     /// Add a raw platform-specific sandbox rule.
@@ -655,6 +636,40 @@ fn support_info() -> SupportInfo {
     }
 }
 
+/// Parse a policy.json document.
+#[pyfunction]
+fn load_policy(json: &str) -> PyResult<policy::Policy> {
+    policy::load_policy(json).map_err(to_py_err)
+}
+
+/// Load the embedded nono policy bundled with this package.
+#[pyfunction]
+fn load_embedded_policy() -> PyResult<policy::Policy> {
+    policy::load_embedded_policy().map_err(to_py_err)
+}
+
+/// Return the raw embedded policy.json string.
+#[pyfunction]
+fn embedded_policy_json() -> &'static str {
+    include_str!("../data/policy.json")
+}
+
+/// Apply post-resolution unlink override rules for writable paths.
+#[pyfunction]
+fn apply_unlink_overrides(caps: &mut CapabilitySet) -> PyResult<()> {
+    policy::apply_unlink_overrides(caps).map_err(to_py_err)
+}
+
+/// Validate deny.access paths against the final capability set.
+#[pyfunction]
+fn validate_deny_overlaps(deny_paths: Vec<String>, caps: &CapabilitySet) -> PyResult<()> {
+    let deny_paths = deny_paths
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
+    policy::validate_deny_overlaps(&deny_paths, caps).map_err(to_py_err)
+}
+
 // ---------------------------------------------------------------------------
 // Module definition
 // ---------------------------------------------------------------------------
@@ -677,13 +692,20 @@ fn _nono_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CapabilitySource>()?;
     m.add_class::<FsCapability>()?;
     m.add_class::<CapabilitySet>()?;
+    m.add_class::<policy::Policy>()?;
+    m.add_class::<policy::ResolvedPolicy>()?;
     m.add_class::<SupportInfo>()?;
     m.add_class::<SandboxState>()?;
     m.add_class::<QueryContext>()?;
     m.add_class::<sandboxed_exec::ExecResult>()?;
     m.add_function(wrap_pyfunction!(apply, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_unlink_overrides, m)?)?;
+    m.add_function(wrap_pyfunction!(embedded_policy_json, m)?)?;
     m.add_function(wrap_pyfunction!(is_supported, m)?)?;
+    m.add_function(wrap_pyfunction!(load_embedded_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(load_policy, m)?)?;
     m.add_function(wrap_pyfunction!(support_info, m)?)?;
     m.add_function(wrap_pyfunction!(sandboxed_exec::sandboxed_exec, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_deny_overlaps, m)?)?;
     Ok(())
 }

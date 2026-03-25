@@ -48,7 +48,7 @@ uv run mypy python/nono_py                   # Type check (strict mode)
 
 ### Key Classes
 
-- **CapabilitySet** — mutable builder: `allow_path()`, `allow_file()`, `block_network()`, `allow_command()`, `block_command()`
+- **CapabilitySet** — mutable builder: `allow_path()`, `allow_file()`, `block_network()`
 - **QueryContext** — test permissions without applying: returns dicts with `status`/`reason` keys
 - **SandboxState** — JSON-serializable snapshot of a CapabilitySet for cross-process transfer
 - **AccessMode** — enum: `READ`, `WRITE`, `READ_WRITE` (frozen)
