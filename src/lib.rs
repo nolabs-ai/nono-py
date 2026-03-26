@@ -15,7 +15,9 @@ use pyo3::prelude::*;
 use std::path::Path;
 
 mod policy;
+mod proxy;
 mod sandboxed_exec;
+mod undo;
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -613,7 +615,8 @@ fn query_result_to_dict(py: Python<'_>, result: &nono::query::QueryResult) -> Py
 ///     RuntimeError: If the platform is not supported or sandbox initialization fails
 #[pyfunction]
 fn apply(caps: &CapabilitySet) -> PyResult<()> {
-    Sandbox::apply(&caps.inner).map_err(to_py_err)
+    Sandbox::apply(&caps.inner).map_err(to_py_err)?;
+    Ok(())
 }
 
 /// Check if sandboxing is supported on this platform.
@@ -698,6 +701,21 @@ fn _nono_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SandboxState>()?;
     m.add_class::<QueryContext>()?;
     m.add_class::<sandboxed_exec::ExecResult>()?;
+    // Proxy classes
+    m.add_class::<proxy::InjectMode>()?;
+    m.add_class::<proxy::RouteConfig>()?;
+    m.add_class::<proxy::ExternalProxyConfig>()?;
+    m.add_class::<proxy::ProxyConfig>()?;
+    m.add_class::<proxy::ProxyHandle>()?;
+    // Undo/snapshot classes
+    m.add_class::<undo::ContentHash>()?;
+    m.add_class::<undo::FileState>()?;
+    m.add_class::<undo::Change>()?;
+    m.add_class::<undo::SnapshotManifest>()?;
+    m.add_class::<undo::ExclusionConfig>()?;
+    m.add_class::<undo::SessionMetadata>()?;
+    m.add_class::<undo::SnapshotManager>()?;
+    // Module functions
     m.add_function(wrap_pyfunction!(apply, m)?)?;
     m.add_function(wrap_pyfunction!(apply_unlink_overrides, m)?)?;
     m.add_function(wrap_pyfunction!(embedded_policy_json, m)?)?;
@@ -707,5 +725,6 @@ fn _nono_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(support_info, m)?)?;
     m.add_function(wrap_pyfunction!(sandboxed_exec::sandboxed_exec, m)?)?;
     m.add_function(wrap_pyfunction!(validate_deny_overlaps, m)?)?;
+    m.add_function(wrap_pyfunction!(proxy::start_proxy, m)?)?;
     Ok(())
 }

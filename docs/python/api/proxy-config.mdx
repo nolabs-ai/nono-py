@@ -1,0 +1,172 @@
+---
+title: ProxyConfig
+description: Network proxy configuration
+---
+
+The proxy system provides domain-filtered, credential-injected network access for sandboxed child processes. The proxy runs in the unsandboxed supervisor process; the sandboxed child connects only to `127.0.0.1` via standard `HTTP_PROXY`/`HTTPS_PROXY` environment variables.
+
+## ProxyConfig
+
+```python
+ProxyConfig(
+    allowed_hosts: list[str] = [],
+    routes: list[RouteConfig] = [],
+    external_proxy: ExternalProxyConfig | None = None,
+    bind_addr: str = "127.0.0.1",
+    bind_port: int = 0,
+    max_connections: int = 256,
+)
+```
+
+Configuration for the nono network filtering proxy.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `allowed_hosts` | `list[str]` | `[]` | Host allowlist. Empty = allow all (except hardcoded deny list). Supports `*.domain` wildcards. |
+| `routes` | `list[RouteConfig]` | `[]` | Reverse proxy credential injection routes. |
+| `external_proxy` | `ExternalProxyConfig \| None` | `None` | Enterprise proxy passthrough configuration. |
+| `bind_addr` | `str` | `"127.0.0.1"` | Address to bind the proxy to. |
+| `bind_port` | `int` | `0` | Port to bind. 0 = OS-assigned ephemeral port. |
+| `max_connections` | `int` | `256` | Maximum concurrent connections. 0 = unlimited. |
+
+### Example
+
+```python
+from nono_py import ProxyConfig, RouteConfig, InjectMode, start_proxy
+
+config = ProxyConfig(
+    allowed_hosts=["api.openai.com", "*.anthropic.com"],
+    routes=[
+        RouteConfig(
+            prefix="/openai",
+            upstream="https://api.openai.com",
+            credential_key="openai-key",
+        ),
+    ],
+)
+proxy = start_proxy(config)
+```
+
+---
+
+## RouteConfig
+
+```python
+RouteConfig(
+    prefix: str,
+    upstream: str,
+    credential_key: str | None = None,
+    inject_mode: InjectMode = InjectMode.HEADER,
+    inject_header: str = "Authorization",
+    credential_format: str = "Bearer {}",
+    path_pattern: str | None = None,
+    path_replacement: str | None = None,
+    query_param_name: str | None = None,
+    env_var: str | None = None,
+)
+```
+
+Configuration for a reverse proxy credential injection route. When the sandboxed child sends a request to `http://127.0.0.1:<port>/<prefix>/...`, the proxy forwards it to `upstream` with real credentials injected.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `prefix` | `str` | required | Path prefix for routing (e.g., `"/openai"`) |
+| `upstream` | `str` | required | Upstream URL (e.g., `"https://api.openai.com"`) |
+| `credential_key` | `str \| None` | `None` | OS keyring account name for the credential |
+| `inject_mode` | `InjectMode` | `HEADER` | How to inject the credential |
+| `inject_header` | `str` | `"Authorization"` | Header name (for `HEADER` mode) |
+| `credential_format` | `str` | `"Bearer {}"` | Format string with `{}` placeholder for the credential |
+| `path_pattern` | `str \| None` | `None` | URL path mode: pattern to match in incoming path |
+| `path_replacement` | `str \| None` | `None` | URL path mode: replacement pattern for outgoing path |
+| `query_param_name` | `str \| None` | `None` | Query param mode: parameter name |
+| `env_var` | `str \| None` | `None` | Override env var name for the phantom token |
+
+---
+
+## InjectMode
+
+Credential injection method:
+
+| Value | Description |
+|-------|-------------|
+| `InjectMode.HEADER` | Inject as HTTP header (default) |
+| `InjectMode.URL_PATH` | Replace pattern in URL path |
+| `InjectMode.QUERY_PARAM` | Add as query parameter |
+| `InjectMode.BASIC_AUTH` | HTTP Basic Authentication |
+
+---
+
+## ProxyHandle
+
+Returned by `start_proxy()`. Not user-constructable.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `port` | `int` | Port the proxy is listening on |
+
+### Methods
+
+#### `env_vars() -> dict[str, str]`
+
+Environment variables to inject into the sandboxed child: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `NONO_PROXY_TOKEN`, and lowercase variants.
+
+#### `credential_env_vars() -> dict[str, str]`
+
+Per-route base URL overrides and phantom tokens (e.g., `OPENAI_BASE_URL`, `OPENAI_API_KEY`). Only includes routes where credentials were loaded from the keyring.
+
+#### `drain_audit_events() -> list[dict]`
+
+Drain and return collected network audit events. Each dict contains: `timestamp_unix_ms`, `mode`, `decision`, `target`, `port`, `method`, `path`, `status`, `reason`.
+
+#### `shutdown() -> None`
+
+Signal the proxy to shut down gracefully.
+
+### Example
+
+```python
+proxy = start_proxy(config)
+
+# Pass to sandboxed child
+env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
+
+# Review what happened
+for event in proxy.drain_audit_events():
+    print(f"[{event['decision']}] {event['mode']} -> {event['target']}")
+
+proxy.shutdown()
+```
+
+---
+
+## ExternalProxyConfig
+
+Enterprise proxy passthrough for environments behind a corporate proxy.
+
+```python
+ExternalProxyConfig(
+    address: str,
+    bypass_hosts: list[str] = [],
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `address` | `str` | required | Proxy address (e.g., `"squid.corp.internal:3128"`) |
+| `bypass_hosts` | `list[str]` | `[]` | Hosts that bypass the external proxy. Supports `*.domain` wildcards. |
+
+## Security Properties
+
+- **Cloud metadata deny list**: `169.254.169.254` and equivalents are always blocked
+- **DNS rebinding protection**: Resolved IPs are validated against link-local ranges
+- **Credential isolation**: Real API keys never reach the sandboxed process
+- **Constant-time token comparison**: Prevents timing side-channel attacks
+- **Audit logging**: Every request logged, sensitive data excluded
+
+## Related
+
+- [Module Functions](/python/api/functions) - `start_proxy()` function
+- [SnapshotManager](/python/api/snapshot-manager) - Filesystem rollback

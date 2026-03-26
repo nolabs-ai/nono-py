@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nono-py"
-version = "0.6.0"
+version = "0.7.0"
 description = "Python bindings for nono capability-based sandboxing"
 readme = "README.md"
 authors = [{ name = "Luke Hinds", email = "lukehinds@gmail.com" }]

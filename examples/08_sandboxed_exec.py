@@ -10,6 +10,7 @@ This is the primitive that sandbox backends (e.g., LangChain Deep Agents)
 use to run agent commands under OS-enforced isolation.
 """
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -23,17 +24,13 @@ def build_caps(workdir: str) -> CapabilitySet:
 
     # System paths needed for shell commands to run
     for sys_path in ["/usr", "/bin", "/sbin", "/lib"]:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             caps.allow_path(sys_path, AccessMode.READ)
-        except FileNotFoundError:
-            pass
 
     # macOS-specific system paths
     for sys_path in ["/private", "/Library/Frameworks", "/dev"]:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             caps.allow_path(sys_path, AccessMode.READ)
-        except FileNotFoundError:
-            pass
 
     # Grant read-write to the working directory
     caps.allow_path(workdir, AccessMode.READ_WRITE)

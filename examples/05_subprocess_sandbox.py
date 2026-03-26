@@ -84,7 +84,10 @@ def main() -> None:
         # Allow read access to the nono_py package
         import nono_py
 
-        pkg_dir = os.path.dirname(nono_py.__file__)
+        module_file = nono_py.__file__
+        if module_file is None:
+            raise RuntimeError("nono_py.__file__ is unavailable")
+        pkg_dir = os.path.dirname(module_file)
         caps.allow_path(pkg_dir, AccessMode.READ)
         caps.block_network()
 

@@ -3,7 +3,7 @@ title: Module Functions
 description: Top-level functions in nono_py
 ---
 
-The `nono_py` module provides three top-level functions for applying sandboxes and checking platform support.
+The `nono_py` module provides functions for applying sandboxes, starting the network proxy, and checking platform support.
 
 ## apply
 
@@ -178,23 +178,67 @@ def require_sandbox():
 require_sandbox()
 ```
 
+---
+
+## start_proxy
+
+```python
+start_proxy(config: ProxyConfig) -> ProxyHandle
+```
+
+Start the nono network filtering proxy.
+
+Creates a localhost proxy server that provides domain filtering, credential injection, and audit logging for sandboxed child processes. The proxy runs on a background thread and is shut down via the returned handle.
+
+<ParamField path="config" type="ProxyConfig" required>
+  Proxy configuration including allowed hosts, credential routes, and bind settings.
+</ParamField>
+
+**Returns:** `ProxyHandle` with `env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.
+
+**Raises:**
+- `RuntimeError` - Proxy failed to start (port in use, etc.)
+
+### Example
+
+```python
+from nono_py import ProxyConfig, RouteConfig, start_proxy, sandboxed_exec
+
+config = ProxyConfig(
+    allowed_hosts=["api.openai.com"],
+    routes=[
+        RouteConfig(
+            prefix="/openai",
+            upstream="https://api.openai.com",
+            credential_key="openai-key",
+        ),
+    ],
+)
+proxy = start_proxy(config)
+
+# Inject env vars into sandboxed child
+env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
+
+# Collect audit trail and shut down
+events = proxy.drain_audit_events()
+proxy.shutdown()
+```
+
+---
+
 ## Import
 
 All functions are available from the top-level module:
 
 ```python
-from nono_py import apply, is_supported, support_info
-
-# Or import the module
-import nono_py
-
-nono_py.apply(caps)
-nono_py.is_supported()
-nono_py.support_info()
+from nono_py import apply, start_proxy, sandboxed_exec, is_supported, support_info
 ```
 
 ## Related
 
 - [CapabilitySet](/python/api/capability-set) - Build capabilities to pass to `apply()`
+- [ProxyConfig](/python/api/proxy-config) - Configure the network proxy
+- [SnapshotManager](/python/api/snapshot-manager) - Filesystem snapshots and rollback
 - [SupportInfo](/python/api/support-info) - Returned by `support_info()`
 - [QueryContext](/python/api/query-context) - Check permissions without applying

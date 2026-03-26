@@ -1,0 +1,224 @@
+---
+title: SnapshotManager
+description: Filesystem snapshots and rollback
+---
+
+The snapshot system provides content-addressable filesystem state capture with Merkle-committed integrity. Take a baseline before an agent runs, detect changes incrementally, and roll back to any previous state.
+
+## SnapshotManager
+
+```python
+SnapshotManager(
+    session_dir: str,
+    tracked_paths: list[str],
+    exclusion: ExclusionConfig | None = None,
+    max_entries: int = 300_000,
+    max_bytes: int = 2_147_483_648,
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `session_dir` | `str` | required | Directory for session data (snapshots, objects) |
+| `tracked_paths` | `list[str]` | required | Directories to track for changes |
+| `exclusion` | `ExclusionConfig \| None` | `None` | File exclusion configuration |
+| `max_entries` | `int` | `300,000` | Maximum files to track |
+| `max_bytes` | `int` | 2 GiB | Maximum total bytes to track |
+
+Each tracked path gets its own exclusion filter, so `.gitignore` rules are interpreted relative to their own root directory.
+
+### Methods
+
+#### `create_baseline() -> SnapshotManifest`
+
+Capture the initial filesystem state. Must be called before `create_incremental()`.
+
+#### `create_incremental() -> tuple[SnapshotManifest, list[Change]]`
+
+Capture current state and return changes since the last snapshot. Uses mtime/size as a fast check, then hashes changed files.
+
+#### `restore_to(snapshot_number: int) -> list[Change]`
+
+Restore the filesystem to a previous snapshot. Retrieves file content from the object store, deletes files created after that snapshot. Returns the list of changes applied.
+
+#### `compute_restore_diff(snapshot_number: int) -> list[Change]`
+
+Dry-run: compute what `restore_to()` would change without modifying the filesystem.
+
+#### `load_manifest(number: int) -> SnapshotManifest`
+
+Load a snapshot manifest from disk by number.
+
+#### `save_session_metadata(meta: SessionMetadata) -> None`
+
+Save session metadata to the session directory.
+
+#### `snapshot_count() -> int`
+
+Number of snapshots taken (including resumed sessions).
+
+#### `load_session_metadata(session_dir: str) -> SessionMetadata` (static)
+
+Load session metadata from a session directory without creating a full manager.
+
+### Example
+
+```python
+from nono_py import SnapshotManager, ExclusionConfig
+
+mgr = SnapshotManager(
+    session_dir="~/.nono/rollbacks/session-001",
+    tracked_paths=["/workspace"],
+    exclusion=ExclusionConfig(
+        exclude_patterns=["node_modules", "__pycache__"],
+        exclude_globs=["*.pyc"],
+    ),
+)
+
+# Capture baseline
+baseline = mgr.create_baseline()
+print(f"Merkle root: {baseline.merkle_root.hex()}")
+
+# ... agent modifies files ...
+
+# Capture changes
+manifest, changes = mgr.create_incremental()
+for change in changes:
+    print(f"{change.change_type}: {change.path}")
+
+# Roll back
+mgr.restore_to(snapshot_number=0)
+```
+
+### Resuming Sessions
+
+A new `SnapshotManager` pointed at an existing `session_dir` automatically loads the latest manifest from disk. This means `create_incremental()` works without calling `create_baseline()` again, and `snapshot_count()` returns the correct value.
+
+```python
+# Later, or in a new process:
+mgr = SnapshotManager(session_dir="~/.nono/rollbacks/session-001", tracked_paths=["/workspace"])
+print(mgr.snapshot_count())  # Reflects snapshots already on disk
+manifest, changes = mgr.create_incremental()
+```
+
+---
+
+## ExclusionConfig
+
+```python
+ExclusionConfig(
+    use_gitignore: bool = True,
+    exclude_patterns: list[str] = [],
+    exclude_globs: list[str] = [],
+    force_include: list[str] = [],
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `use_gitignore` | `bool` | `True` | Respect `.gitignore` files in tracked roots |
+| `exclude_patterns` | `list[str]` | `[]` | Component-level or path-substring patterns |
+| `exclude_globs` | `list[str]` | `[]` | Glob patterns matched against filenames |
+| `force_include` | `list[str]` | `[]` | Patterns that override all exclusions |
+
+---
+
+## SnapshotManifest
+
+A snapshot recording the state of all tracked files. Returned by `create_baseline()` and `create_incremental()`.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `number` | `int` | Snapshot sequence number (0 = baseline) |
+| `timestamp` | `str` | ISO 8601 creation timestamp |
+| `parent` | `int \| None` | Parent snapshot number |
+| `merkle_root` | `ContentHash` | Cryptographic commitment to the entire state |
+| `files` | `dict[str, FileState]` | Mapping of file paths to their state |
+
+---
+
+## ContentHash
+
+SHA-256 content hash. Immutable and hashable.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `hex()` | `str` | 64-character hex string |
+
+---
+
+## FileState
+
+State of a single file within a snapshot.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `hash` | `ContentHash` | SHA-256 of file content |
+| `size` | `int` | File size in bytes |
+| `mtime` | `int` | Modification time (seconds since epoch) |
+| `permissions` | `int` | Unix permission bits |
+
+---
+
+## Change
+
+A filesystem change detected between snapshots.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `path` | `str` | Path of the changed file |
+| `change_type` | `str` | `"created"`, `"modified"`, `"deleted"`, or `"permissions_changed"` |
+| `size_delta` | `int \| None` | Size difference in bytes |
+
+---
+
+## SessionMetadata
+
+Metadata for a sandboxed session. Ties together the snapshot chain, network audit trail, and execution context.
+
+```python
+SessionMetadata(
+    session_id: str,
+    command: list[str],
+    tracked_paths: list[str],
+)
+```
+
+**Constructor arguments** (read-only after creation):
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `session_id` | `str` | Session identifier |
+| `started` | `str` | ISO 8601 start time (set automatically) |
+| `command` | `list[str]` | Command that was executed |
+| `tracked_paths` | `list[str]` | Tracked directories |
+
+**Mutable properties** (set after the session runs):
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `ended` | `str \| None` | ISO 8601 end time |
+| `snapshot_count` | `int` | Number of snapshots |
+| `exit_code` | `int \| None` | Child process exit code |
+| `merkle_roots` | `list[ContentHash]` | Chain of Merkle roots from each snapshot (read-only, use `add_merkle_root()`) |
+| `network_events` | `list[dict]` | Network audit events (read-only, use `set_network_events()`) |
+
+| Method | Description |
+|--------|-------------|
+| `add_merkle_root(root)` | Append a Merkle root to the chain |
+| `set_network_events(events)` | Set network events from a list of dicts |
+| `to_json() -> str` | Serialize to JSON |
+| `from_json(json) -> SessionMetadata` | Deserialize from JSON (static) |
+
+## Security Properties
+
+- **Merkle commitment**: Single root hash commits to the entire filesystem state
+- **Content-addressable dedup**: Identical file content stored once
+- **APFS clonefile**: Copy-on-write on macOS for efficient snapshots
+- **Atomic writes**: Temp file + rename for all persistent state
+- **TOCTOU protection**: File content verified after storage
+
+## Related
+
+- [ProxyConfig](/python/api/proxy-config) - Network proxy configuration
+- [Module Functions](/python/api/functions) - `start_proxy()`, `sandboxed_exec()`

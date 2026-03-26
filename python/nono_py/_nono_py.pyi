@@ -374,3 +374,312 @@ def support_info() -> SupportInfo:
 def validate_deny_overlaps(deny_paths: list[str], caps: CapabilitySet) -> None:
     """Validate deny.access paths against the final capability set."""
     ...
+
+# ---------------------------------------------------------------------------
+# Proxy types
+# ---------------------------------------------------------------------------
+
+class InjectMode(Enum):
+    """Credential injection method for reverse proxy routes."""
+
+    HEADER = ...
+    URL_PATH = ...
+    QUERY_PARAM = ...
+    BASIC_AUTH = ...
+
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def __hash__(self) -> int: ...
+    def __eq__(self, other: object) -> bool: ...
+
+class RouteConfig:
+    """Configuration for a reverse proxy credential injection route."""
+
+    def __init__(
+        self,
+        prefix: str,
+        upstream: str,
+        credential_key: str | None = None,
+        inject_mode: InjectMode = InjectMode.HEADER,
+        inject_header: str = "Authorization",
+        credential_format: str = "Bearer {}",
+        path_pattern: str | None = None,
+        path_replacement: str | None = None,
+        query_param_name: str | None = None,
+        env_var: str | None = None,
+    ) -> None: ...
+    @property
+    def prefix(self) -> str: ...
+    @property
+    def upstream(self) -> str: ...
+    @property
+    def credential_key(self) -> str | None: ...
+    @property
+    def inject_mode(self) -> InjectMode: ...
+    @property
+    def inject_header(self) -> str: ...
+    @property
+    def credential_format(self) -> str: ...
+    @property
+    def path_pattern(self) -> str | None: ...
+    @property
+    def path_replacement(self) -> str | None: ...
+    @property
+    def query_param_name(self) -> str | None: ...
+    @property
+    def env_var(self) -> str | None: ...
+    def __repr__(self) -> str: ...
+
+class ExternalProxyConfig:
+    """Configuration for enterprise proxy passthrough."""
+
+    def __init__(
+        self,
+        address: str,
+        bypass_hosts: list[str] = ...,
+    ) -> None: ...
+    @property
+    def address(self) -> str: ...
+    @property
+    def bypass_hosts(self) -> list[str]: ...
+    def __repr__(self) -> str: ...
+
+class ProxyConfig:
+    """Configuration for the nono network filtering proxy."""
+
+    def __init__(
+        self,
+        allowed_hosts: list[str] = ...,
+        routes: list[RouteConfig] = ...,
+        external_proxy: ExternalProxyConfig | None = None,
+        bind_addr: str = "127.0.0.1",
+        bind_port: int = 0,
+        max_connections: int = 256,
+    ) -> None: ...
+    @property
+    def bind_addr(self) -> str: ...
+    @property
+    def bind_port(self) -> int: ...
+    @property
+    def allowed_hosts(self) -> list[str]: ...
+    @property
+    def routes(self) -> list[RouteConfig]: ...
+    @property
+    def max_connections(self) -> int: ...
+    def __repr__(self) -> str: ...
+
+class NetworkAuditEvent(TypedDict, total=False):
+    """A network request observed by the proxy."""
+
+    timestamp_unix_ms: int
+    mode: str  # "connect", "reverse", "external"
+    decision: str  # "allow", "deny"
+    target: str
+    port: int | None
+    method: str | None
+    path: str | None
+    status: int | None
+    reason: str | None
+
+class ProxyHandle:
+    """Handle to a running nono proxy instance."""
+
+    @property
+    def port(self) -> int:
+        """The port the proxy is listening on."""
+        ...
+
+    def env_vars(self) -> dict[str, str]:
+        """Environment variables to inject into the sandboxed child process."""
+        ...
+
+    def credential_env_vars(self) -> dict[str, str]:
+        """Environment variables for reverse proxy credential routes."""
+        ...
+
+    def drain_audit_events(self) -> list[NetworkAuditEvent]:
+        """Drain and return collected network audit events."""
+        ...
+
+    def shutdown(self) -> None:
+        """Signal the proxy to shut down gracefully."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+def start_proxy(config: ProxyConfig) -> ProxyHandle:
+    """Start the nono network filtering proxy.
+
+    Args:
+        config: Proxy configuration
+
+    Returns:
+        ProxyHandle for the running proxy
+
+    Raises:
+        RuntimeError: If the proxy fails to start
+    """
+    ...
+
+# ---------------------------------------------------------------------------
+# Undo/snapshot types
+# ---------------------------------------------------------------------------
+
+class ContentHash:
+    """SHA-256 content hash for content-addressable storage."""
+
+    def hex(self) -> str:
+        """Return the hash as a 64-character hex string."""
+        ...
+
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def __hash__(self) -> int: ...
+    def __eq__(self, other: object) -> bool: ...
+
+class FileState:
+    """Filesystem state of a single file within a snapshot."""
+
+    @property
+    def hash(self) -> ContentHash: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def mtime(self) -> int: ...
+    @property
+    def permissions(self) -> int: ...
+    def __repr__(self) -> str: ...
+
+class Change:
+    """A filesystem change detected between snapshots."""
+
+    @property
+    def path(self) -> str: ...
+    @property
+    def change_type(self) -> str:
+        """One of: "created", "modified", "deleted", "permissions_changed"."""
+        ...
+    @property
+    def size_delta(self) -> int | None: ...
+    def __repr__(self) -> str: ...
+
+class SnapshotManifest:
+    """A snapshot manifest recording the state of all tracked files."""
+
+    @property
+    def number(self) -> int: ...
+    @property
+    def timestamp(self) -> str: ...
+    @property
+    def parent(self) -> int | None: ...
+    @property
+    def merkle_root(self) -> ContentHash: ...
+    @property
+    def files(self) -> dict[str, FileState]: ...
+    def __repr__(self) -> str: ...
+
+class ExclusionConfig:
+    """Configuration for excluding files from snapshot tracking."""
+
+    def __init__(
+        self,
+        use_gitignore: bool = True,
+        exclude_patterns: list[str] = ...,
+        exclude_globs: list[str] = ...,
+        force_include: list[str] = ...,
+    ) -> None: ...
+    @property
+    def use_gitignore(self) -> bool: ...
+    @property
+    def exclude_patterns(self) -> list[str]: ...
+    @property
+    def exclude_globs(self) -> list[str]: ...
+    @property
+    def force_include(self) -> list[str]: ...
+    def __repr__(self) -> str: ...
+
+class SessionMetadata:
+    """Metadata for a sandboxed session including snapshots and audit trail."""
+
+    def __init__(
+        self,
+        session_id: str,
+        command: list[str],
+        tracked_paths: list[str],
+    ) -> None: ...
+    @property
+    def session_id(self) -> str: ...
+    @property
+    def started(self) -> str: ...
+    @property
+    def ended(self) -> str | None: ...
+    @ended.setter
+    def ended(self, value: str | None) -> None: ...
+    @property
+    def command(self) -> list[str]: ...
+    @property
+    def tracked_paths(self) -> list[str]: ...
+    @property
+    def snapshot_count(self) -> int: ...
+    @snapshot_count.setter
+    def snapshot_count(self, value: int) -> None: ...
+    @property
+    def exit_code(self) -> int | None: ...
+    @exit_code.setter
+    def exit_code(self, value: int | None) -> None: ...
+    @property
+    def merkle_roots(self) -> list[ContentHash]: ...
+    def add_merkle_root(self, root: ContentHash) -> None: ...
+    @property
+    def network_events(self) -> list[NetworkAuditEvent]: ...
+    def set_network_events(self, events: list[NetworkAuditEvent]) -> None: ...
+    def to_json(self) -> str: ...
+    @staticmethod
+    def from_json(json: str) -> SessionMetadata: ...
+    def __repr__(self) -> str: ...
+
+class SnapshotManager:
+    """Manages content-addressable filesystem snapshots for a session."""
+
+    def __init__(
+        self,
+        session_dir: str,
+        tracked_paths: list[str],
+        exclusion: ExclusionConfig | None = None,
+        max_entries: int = 300_000,
+        max_bytes: int = 2_147_483_648,
+    ) -> None: ...
+    def create_baseline(self) -> SnapshotManifest:
+        """Create a baseline snapshot of the current filesystem state."""
+        ...
+
+    def create_incremental(self) -> tuple[SnapshotManifest, list[Change]]:
+        """Create an incremental snapshot capturing changes since the last snapshot."""
+        ...
+
+    def compute_restore_diff(self, snapshot_number: int) -> list[Change]:
+        """Compute what changes would be needed to restore to a given snapshot."""
+        ...
+
+    def restore_to(self, snapshot_number: int) -> list[Change]:
+        """Restore the filesystem to the state captured in a snapshot."""
+        ...
+
+    def load_manifest(self, number: int) -> SnapshotManifest:
+        """Load a snapshot manifest by number."""
+        ...
+
+    def save_session_metadata(self, meta: SessionMetadata) -> None:
+        """Save session metadata to the session directory."""
+        ...
+
+    def snapshot_count(self) -> int:
+        """Number of snapshots taken in this session."""
+        ...
+
+    @staticmethod
+    def load_session_metadata(session_dir: str) -> SessionMetadata:
+        """Load session metadata from a session directory."""
+        ...
+
+    def __repr__(self) -> str: ...

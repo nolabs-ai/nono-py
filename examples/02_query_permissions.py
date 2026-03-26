@@ -47,8 +47,10 @@ def main() -> None:
         else:
             print(f"{mode_str:10} {path}")
             print(f"  -> DENIED ({reason})")
-            if "granted" in result and "requested" in result:
-                print(f"     granted={result['granted']}, requested={result['requested']}")
+            if reason == "insufficient_access":
+                granted = result.get("granted", "unknown")
+                requested = result.get("requested", "unknown")
+                print(f"     granted={granted}, requested={requested}")
         print()
 
     # Query network access
