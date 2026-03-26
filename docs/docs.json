@@ -34,6 +34,8 @@
         "pages": [
           "python/api/capability-set",
           "python/api/access-mode",
+          "python/api/proxy-config",
+          "python/api/snapshot-manager",
           "python/api/query-context",
           "python/api/sandbox-state",
           "python/api/fs-capability",

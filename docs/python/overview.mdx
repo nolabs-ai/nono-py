@@ -14,6 +14,12 @@ The nono Python SDK provides OS-enforced sandboxing using Landlock (Linux) and S
   <Card title="Capability-Based" icon="key">
     Explicitly grant access to files, directories, and network. Everything else is denied by default.
   </Card>
+  <Card title="Network Proxy" icon="globe">
+    Domain-filtered, credential-injected network access. Sandboxed processes reach only allowed hosts. Real API keys never leave the supervisor.
+  </Card>
+  <Card title="Filesystem Rollback" icon="rotate-left">
+    Content-addressable snapshots with Merkle-committed state. Roll back any changes made by a sandboxed agent.
+  </Card>
   <Card title="Cross-Platform" icon="desktop">
     Works on Linux (Landlock) and macOS (Seatbelt) with a unified API.
   </Card>
@@ -52,7 +58,7 @@ apply(caps)
 
 The Python SDK is ideal for:
 
-- **AI Agents**: Sandbox untrusted code execution from LLM-generated scripts
+- **AI Agent Supervisors**: Orchestrate sandboxed agents with network filtering, credential injection, and filesystem rollback
 - **Plugin Systems**: Isolate third-party plugins from your main application
 - **Data Processing**: Limit file access when processing untrusted data
 - **Testing**: Ensure tests don't accidentally modify system files

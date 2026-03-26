@@ -316,6 +316,138 @@ save_sandbox_state(caps)
 # load_and_apply_sandbox()
 ```
 
+## AI Agent Supervisor with Proxy and Rollback
+
+The complete orchestration pattern: proxy + sandbox + snapshots + audit + rollback.
+
+```python
+from nono_py import (
+    AccessMode, CapabilitySet, ExclusionConfig, ProxyConfig, RouteConfig,
+    SessionMetadata, SnapshotManager, sandboxed_exec, start_proxy,
+)
+
+# 1. Start proxy with domain filtering and credential injection
+config = ProxyConfig(
+    allowed_hosts=["api.openai.com"],
+    routes=[
+        RouteConfig(prefix="/openai", upstream="https://api.openai.com",
+                    credential_key="openai-key"),
+    ],
+)
+proxy = start_proxy(config)
+
+# 2. Take baseline snapshot
+mgr = SnapshotManager(
+    session_dir="~/.nono/rollbacks/session-001",
+    tracked_paths=["/workspace"],
+    exclusion=ExclusionConfig(exclude_patterns=["node_modules"]),
+)
+mgr.create_baseline()
+
+# 3. Run sandboxed agent with proxy env vars
+caps = CapabilitySet()
+caps.allow_path("/workspace", AccessMode.READ_WRITE)
+caps.block_network()  # Direct network blocked; proxy provides filtered access
+
+env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
+
+# 4. Capture changes and audit trail
+manifest, changes = mgr.create_incremental()
+audit_events = proxy.drain_audit_events()
+
+# 5. Build session metadata
+meta = SessionMetadata(
+    session_id="session-001",
+    command=["python", "agent.py"],
+    tracked_paths=["/workspace"],
+)
+meta.exit_code = result.exit_code
+meta.snapshot_count = mgr.snapshot_count()
+meta.add_merkle_root(manifest.merkle_root)
+meta.set_network_events(audit_events)
+mgr.save_session_metadata(meta)
+
+# 6. Roll back if needed
+mgr.restore_to(snapshot_number=0)
+proxy.shutdown()
+```
+
+## Filesystem Snapshot and Rollback
+
+Content-addressable snapshots with change detection:
+
+```python
+from nono_py import SnapshotManager, ExclusionConfig
+
+mgr = SnapshotManager(
+    session_dir="/tmp/session",
+    tracked_paths=["/workspace"],
+    exclusion=ExclusionConfig(
+        exclude_patterns=["node_modules", "__pycache__"],
+        exclude_globs=["*.pyc"],
+    ),
+)
+
+# Capture initial state
+baseline = mgr.create_baseline()
+print(f"Tracking {len(baseline.files)} files")
+print(f"Merkle root: {baseline.merkle_root.hex()[:32]}...")
+
+# ... agent modifies files ...
+
+# Detect changes
+manifest, changes = mgr.create_incremental()
+for change in changes:
+    delta = f" ({change.size_delta:+d}B)" if change.size_delta else ""
+    print(f"  {change.change_type}: {change.path}{delta}")
+
+# Preview restore without applying
+diff = mgr.compute_restore_diff(0)
+print(f"Restore would apply {len(diff)} changes")
+
+# Roll back
+mgr.restore_to(snapshot_number=0)
+```
+
+## Network Proxy with Domain Filtering
+
+Control which hosts a sandboxed process can reach:
+
+```python
+from nono_py import ProxyConfig, RouteConfig, InjectMode, start_proxy
+
+config = ProxyConfig(
+    allowed_hosts=["api.openai.com", "*.anthropic.com"],
+    routes=[
+        RouteConfig(
+            prefix="/openai",
+            upstream="https://api.openai.com",
+            credential_key="openai-key",
+            inject_mode=InjectMode.HEADER,
+            credential_format="Bearer {}",
+        ),
+        RouteConfig(
+            prefix="/maps",
+            upstream="https://maps.googleapis.com",
+            credential_key="google-maps-key",
+            inject_mode=InjectMode.QUERY_PARAM,
+            query_param_name="key",
+        ),
+    ],
+)
+
+proxy = start_proxy(config)
+print(f"Proxy on port {proxy.port}")
+print(f"Env vars: {list(proxy.env_vars().keys())}")
+
+# After running sandboxed child:
+for event in proxy.drain_audit_events():
+    print(f"[{event['decision']}] {event['target']}")
+
+proxy.shutdown()
+```
+
 ## Testing Sandbox Configurations
 
 Unit test your sandbox configurations:

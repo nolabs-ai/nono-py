@@ -74,130 +74,96 @@ apply(caps)
 
 ## API Reference
 
-### Enums
-
-#### `AccessMode`
-
-File system access mode:
-- `AccessMode.READ` - Read-only access
-- `AccessMode.WRITE` - Write-only access
-- `AccessMode.READ_WRITE` - Both read and write access
-
-### Classes
+### Sandboxing
 
 #### `CapabilitySet`
 
-A collection of capabilities that define sandbox permissions.
+Build sandbox permissions:
 
 ```python
 caps = CapabilitySet()
-
-# Add directory access (recursive)
 caps.allow_path("/tmp", AccessMode.READ_WRITE)
-
-# Add single file access
 caps.allow_file("/etc/hosts", AccessMode.READ)
-
-# Block network
 caps.block_network()
-
-# Add platform-specific rule (macOS Seatbelt)
-caps.platform_rule("(allow mach-lookup (global-name \"com.apple.system.logger\"))")
-
-# Utility methods
-caps.deduplicate()  # Remove duplicates
-caps.path_covered("/tmp/foo")  # Check if path is covered
-caps.fs_capabilities()  # List all fs capabilities
-caps.summary()  # Human-readable summary
+apply(caps)  # Irreversible!
 ```
 
-#### `QueryContext`
+#### `sandboxed_exec`
 
-Query permissions without applying the sandbox:
+Run a command in a sandboxed child process (parent stays unsandboxed):
 
 ```python
-caps = CapabilitySet()
-caps.allow_path("/tmp", AccessMode.READ)
-
-ctx = QueryContext(caps)
-
-result = ctx.query_path("/tmp/file.txt", AccessMode.READ)
-# {'status': 'allowed', 'reason': 'granted_path', 'granted_path': '/tmp', 'access': 'read'}
-
-result = ctx.query_path("/var/log/test", AccessMode.READ)
-# {'status': 'denied', 'reason': 'path_not_granted'}
-
-result = ctx.query_network()
-# {'status': 'allowed', 'reason': 'network_allowed'}
+result = sandboxed_exec(caps, ["python", "agent.py"], cwd="/workspace", timeout_secs=30.0)
+print(result.stdout, result.exit_code)
 ```
 
-#### `SandboxState`
+### Network Proxy
 
-Serialize and restore capability sets:
+Domain-filtered network access for sandboxed children. The proxy intercepts
+outbound HTTP requests and enforces a host allowlist. For API calls, it
+performs credential injection: the sandboxed process sends a dummy token, and
+the proxy transparently swaps in the real API key (loaded from the OS keyring)
+before forwarding upstream. The sandboxed process never sees the real secret.
 
 ```python
-caps = CapabilitySet()
-caps.allow_path("/tmp", AccessMode.READ)
+from nono_py import ProxyConfig, RouteConfig, start_proxy
 
-# Serialize to JSON
-state = SandboxState.from_caps(caps)
-json_str = state.to_json()
+config = ProxyConfig(
+    allowed_hosts=["api.openai.com", "*.anthropic.com"],
+    routes=[
+        RouteConfig(prefix="/openai", upstream="https://api.openai.com", credential_key="openai-key"),
+    ],
+)
+proxy = start_proxy(config)
 
-# Restore from JSON
-restored_state = SandboxState.from_json(json_str)
-restored_caps = restored_state.to_caps()
+# Inject proxy env vars into sandboxed child
+env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
+
+# Audit trail
+events = proxy.drain_audit_events()
+proxy.shutdown()
 ```
 
-#### `SupportInfo`
+### Filesystem Snapshots
 
-Platform support information:
+Content-addressable snapshots with Merkle-committed state and rollback:
 
 ```python
-info = support_info()
-print(info.is_supported)  # True/False
-print(info.platform)      # "linux" or "macos"
-print(info.details)       # Human-readable details
+from nono_py import SnapshotManager, ExclusionConfig
+
+mgr = SnapshotManager(
+    session_dir="~/.nono/rollbacks/session-001",
+    tracked_paths=["/workspace"],
+    exclusion=ExclusionConfig(exclude_patterns=["node_modules", "__pycache__"]),
+)
+mgr.create_baseline()
+
+# ... agent runs and modifies files ...
+
+manifest, changes = mgr.create_incremental()
+for change in changes:
+    print(f"{change.change_type}: {change.path}")
+
+# Roll back
+mgr.restore_to(snapshot_number=0)
 ```
 
-#### `Policy`
+### Other Classes
 
-Load a `policy.json` document and resolve named groups into a `CapabilitySet`:
-
-```python
-from pathlib import Path
-
-from nono_py import CapabilitySet, load_policy
-
-policy = load_policy(Path("examples/policy_example.json").read_text())
-caps = CapabilitySet()
-resolved = policy.resolve_groups(["system_tmp_read", "deny_secrets"], caps)
-
-print(resolved.names)
-print(resolved.deny_paths)
-print(caps.summary())
-```
+- `QueryContext` - Check permissions without applying the sandbox
+- `SandboxState` - Serialize/restore capability sets as JSON
+- `SupportInfo` - Platform support details
+- `Policy` - Load and resolve `policy.json` documents
+- `SessionMetadata` - Session audit trail with Merkle roots and network events
 
 ### Functions
 
-#### `apply(caps: CapabilitySet) -> None`
-
-Apply the sandbox. **This is irreversible.** Once applied, the current process and all children can only access resources granted by the capabilities.
-
-#### `is_supported() -> bool`
-
-Check if sandboxing is supported on this platform.
-
-#### `support_info() -> SupportInfo`
-
-Get detailed platform support information.
-
-#### `load_policy(json: str) -> Policy`
-
-Parse a `policy.json` document.
-
-#### `load_embedded_policy() -> Policy`
-
-Load the bundled nono policy shipped with the package.
+- `apply(caps)` - Apply sandbox (**irreversible**)
+- `sandboxed_exec(caps, command, ...)` - Run command in sandboxed child
+- `start_proxy(config)` - Start network filtering proxy
+- `is_supported()` / `support_info()` - Platform support
+- `load_policy(json)` / `load_embedded_policy()` - Policy loading
 
 ## Platform Support
 
