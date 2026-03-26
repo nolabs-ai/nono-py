@@ -498,6 +498,61 @@ impl SessionMetadata {
     }
 }
 
+/// Scan the session directory for existing snapshot manifests and load the latest.
+///
+/// SnapshotManager::new() initializes snapshot_count to 0 and latest_manifest
+/// is a Python-side field. When re-creating the wrapper for an existing session,
+/// we need to recover the latest manifest from disk so create_incremental() works.
+fn find_latest_manifest_on_disk(
+    mgr: &RustSnapshotManager,
+    session_dir: &std::path::Path,
+) -> PyResult<Option<RustSnapshotManifest>> {
+    let snapshots_dir = session_dir.join("snapshots");
+    if !snapshots_dir.exists() {
+        return Ok(None);
+    }
+
+    // Find the highest-numbered snapshot manifest on disk
+    let mut max_number: Option<u32> = None;
+    if let Ok(entries) = std::fs::read_dir(&snapshots_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(stem) = name_str.strip_suffix(".json") {
+                if let Ok(num) = stem.parse::<u32>() {
+                    max_number = Some(max_number.map_or(num, |m: u32| m.max(num)));
+                }
+            }
+        }
+    }
+
+    match max_number {
+        Some(n) => {
+            let manifest = mgr.load_manifest(n).map_err(to_py_err)?;
+            Ok(Some(manifest))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Build per-root exclusion filters for each tracked path.
+///
+/// Each tracked root gets its own `ExclusionFilter` constructed with that
+/// root as context, so `.gitignore` rules are interpreted relative to their
+/// own root directory.
+fn build_per_root_filters(
+    config: RustExclusionConfig,
+    tracked: &[PathBuf],
+) -> PyResult<Vec<(PathBuf, ExclusionFilter)>> {
+    tracked
+        .iter()
+        .map(|root| {
+            let filter = ExclusionFilter::new(config.clone(), root).map_err(to_py_err)?;
+            Ok((root.clone(), filter))
+        })
+        .collect()
+}
+
 /// Generate an ISO 8601 timestamp without pulling in the chrono crate.
 fn chrono_now_iso8601() -> String {
     use std::time::SystemTime;
@@ -563,6 +618,10 @@ fn is_leap_year(y: i64) -> bool {
 pub struct SnapshotManager {
     inner: RustSnapshotManager,
     latest_manifest: Option<RustSnapshotManifest>,
+    /// Snapshot count recovered from disk when resuming an existing session.
+    /// The upstream `inner.snapshot_count()` starts at 0 on construction,
+    /// so we track the true count here and keep it in sync.
+    resumed_count: u32,
 }
 
 #[pymethods]
@@ -589,25 +648,34 @@ impl SnapshotManager {
 
         let config = exclusion.map(|e| e.inner.clone()).unwrap_or_default();
 
-        // Use the first tracked path as the gitignore root, or session_dir
-        let root = tracked
-            .first()
-            .cloned()
-            .unwrap_or_else(|| session_path.clone());
-
-        let filter = ExclusionFilter::new(config, &root).map_err(to_py_err)?;
+        // Build per-root exclusion filters so each tracked path's .gitignore
+        // is interpreted relative to its own root directory.
+        let roots = build_per_root_filters(config, &tracked)?;
 
         let budget = WalkBudget {
             max_entries,
             max_bytes,
         };
 
+        let session_path_ref = session_path.clone();
         let inner =
-            RustSnapshotManager::new(session_path, tracked, filter, budget).map_err(to_py_err)?;
+            RustSnapshotManager::new_per_root(session_path, roots, budget).map_err(to_py_err)?;
+
+        // If snapshots already exist on disk, load the latest manifest
+        // so that create_incremental() works after re-creating the wrapper.
+        let latest_manifest = find_latest_manifest_on_disk(&inner, &session_path_ref)?;
+
+        // Derive the true snapshot count from the manifest on disk.
+        // inner.snapshot_count() always starts at 0 on fresh construction.
+        let resumed_count = latest_manifest
+            .as_ref()
+            .map(|m| m.number.saturating_add(1))
+            .unwrap_or(0);
 
         Ok(Self {
             inner,
-            latest_manifest: None,
+            latest_manifest,
+            resumed_count,
         })
     }
 
@@ -692,8 +760,14 @@ impl SnapshotManager {
     }
 
     /// Number of snapshots taken in this session.
+    ///
+    /// Returns the correct count even when resuming an existing session
+    /// where the upstream `inner.snapshot_count()` starts at 0.
     fn snapshot_count(&self) -> u32 {
-        self.inner.snapshot_count()
+        let inner_count = self.inner.snapshot_count();
+        // After create_baseline/create_incremental, inner catches up.
+        // Before that, use the resumed count from disk.
+        inner_count.max(self.resumed_count)
     }
 
     /// Load session metadata from a session directory.

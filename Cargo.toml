@@ -20,3 +20,10 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Local development: override crates.io deps with local paths.
+# Remove this section before release, or when the upstream nono crate
+# publishes the per-root exclusion filter support (new_per_root).
+[patch.crates-io]
+nono = { path = "../nono/crates/nono" }
+nono-proxy = { path = "../nono/crates/nono-proxy" }

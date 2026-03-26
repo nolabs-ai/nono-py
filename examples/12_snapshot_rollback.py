@@ -37,7 +37,7 @@ def main() -> None:
         with open(config_file, "w") as f:
             f.write('{"debug": false}\n')
         print(f"   Workspace: {workspace}")
-        print(f"   Files: README.md, config.json")
+        print("   Files: README.md, config.json")
 
         # --- 2. Create snapshot manager ---
         print("\n2. Creating snapshot manager\n")

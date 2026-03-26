@@ -1,7 +1,7 @@
 """Type stubs for the nono native module."""
 
 from enum import Enum
-from typing import Any, TypedDict
+from typing import TypedDict
 
 class AccessMode(Enum):
     """File system access mode."""
@@ -408,7 +408,6 @@ class RouteConfig:
         query_param_name: str | None = None,
         env_var: str | None = None,
     ) -> None: ...
-
     @property
     def prefix(self) -> str: ...
     @property
@@ -437,9 +436,8 @@ class ExternalProxyConfig:
     def __init__(
         self,
         address: str,
-        bypass_hosts: list[str] | None = None,
+        bypass_hosts: list[str] = ...,
     ) -> None: ...
-
     @property
     def address(self) -> str: ...
     @property
@@ -451,14 +449,13 @@ class ProxyConfig:
 
     def __init__(
         self,
-        allowed_hosts: list[str] | None = None,
-        routes: list[RouteConfig] | None = None,
+        allowed_hosts: list[str] = ...,
+        routes: list[RouteConfig] = ...,
         external_proxy: ExternalProxyConfig | None = None,
         bind_addr: str = "127.0.0.1",
         bind_port: int = 0,
         max_connections: int = 256,
     ) -> None: ...
-
     @property
     def bind_addr(self) -> str: ...
     @property
@@ -587,11 +584,10 @@ class ExclusionConfig:
     def __init__(
         self,
         use_gitignore: bool = True,
-        exclude_patterns: list[str] | None = None,
-        exclude_globs: list[str] | None = None,
-        force_include: list[str] | None = None,
+        exclude_patterns: list[str] = ...,
+        exclude_globs: list[str] = ...,
+        force_include: list[str] = ...,
     ) -> None: ...
-
     @property
     def use_gitignore(self) -> bool: ...
     @property
@@ -611,7 +607,6 @@ class SessionMetadata:
         command: list[str],
         tracked_paths: list[str],
     ) -> None: ...
-
     @property
     def session_id(self) -> str: ...
     @property
@@ -637,7 +632,7 @@ class SessionMetadata:
     def add_merkle_root(self, root: ContentHash) -> None: ...
     @property
     def network_events(self) -> list[NetworkAuditEvent]: ...
-    def set_network_events(self, events: list[dict[str, Any]]) -> None: ...
+    def set_network_events(self, events: list[NetworkAuditEvent]) -> None: ...
     def to_json(self) -> str: ...
     @staticmethod
     def from_json(json: str) -> SessionMetadata: ...
@@ -654,7 +649,6 @@ class SnapshotManager:
         max_entries: int = 300_000,
         max_bytes: int = 2_147_483_648,
     ) -> None: ...
-
     def create_baseline(self) -> SnapshotManifest:
         """Create a baseline snapshot of the current filesystem state."""
         ...

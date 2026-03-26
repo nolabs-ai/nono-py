@@ -25,6 +25,7 @@ Manual testing steps:
     proxy will still log the attempt as an audit event.
 """
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -48,17 +49,13 @@ def build_caps(workdir: str) -> CapabilitySet:
 
     # System paths needed for shell commands
     for sys_path in ["/usr", "/bin", "/sbin", "/lib"]:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             caps.allow_path(sys_path, AccessMode.READ)
-        except FileNotFoundError:
-            pass
 
     # macOS-specific system paths
     for sys_path in ["/private", "/Library/Frameworks", "/dev"]:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             caps.allow_path(sys_path, AccessMode.READ)
-        except FileNotFoundError:
-            pass
 
     # Workspace access
     caps.allow_path(workdir, AccessMode.READ_WRITE)
@@ -90,7 +87,7 @@ def main() -> None:
         initial_file = os.path.join(workspace, "data.txt")
         with open(initial_file, "w") as f:
             f.write("initial data\n")
-        print(f"   Created: data.txt\n")
+        print("   Created: data.txt\n")
 
         # --- 3. Baseline snapshot ---
         print("3. Taking baseline snapshot")
