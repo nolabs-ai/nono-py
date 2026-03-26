@@ -76,23 +76,26 @@ apply(caps)
 
 ### Sandboxing
 
-#### `CapabilitySet`
+#### `CapabilitySet` + `apply()`
 
-Build sandbox permissions:
+Sandbox the current process (irreversible):
 
 ```python
 caps = CapabilitySet()
 caps.allow_path("/tmp", AccessMode.READ_WRITE)
-caps.allow_file("/etc/hosts", AccessMode.READ)
 caps.block_network()
-apply(caps)  # Irreversible!
+apply(caps)  # Process is now sandboxed
 ```
 
 #### `sandboxed_exec`
 
-Run a command in a sandboxed child process (parent stays unsandboxed):
+Run a command in a sandboxed child process. The parent stays unsandboxed
+and can call this repeatedly with different capabilities:
 
 ```python
+caps = CapabilitySet()
+caps.allow_path("/workspace", AccessMode.READ_WRITE)
+caps.block_network()
 result = sandboxed_exec(caps, ["python", "agent.py"], cwd="/workspace", timeout_secs=30.0)
 print(result.stdout, result.exit_code)
 ```

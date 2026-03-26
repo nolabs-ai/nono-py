@@ -615,7 +615,8 @@ fn query_result_to_dict(py: Python<'_>, result: &nono::query::QueryResult) -> Py
 ///     RuntimeError: If the platform is not supported or sandbox initialization fails
 #[pyfunction]
 fn apply(caps: &CapabilitySet) -> PyResult<()> {
-    Sandbox::apply(&caps.inner).map_err(to_py_err)
+    Sandbox::apply(&caps.inner).map_err(to_py_err)?;
+    Ok(())
 }
 
 /// Check if sandboxing is supported on this platform.

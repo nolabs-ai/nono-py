@@ -76,6 +76,9 @@ Configuration for a reverse proxy credential injection route. When the sandboxed
 | `inject_mode` | `InjectMode` | `HEADER` | How to inject the credential |
 | `inject_header` | `str` | `"Authorization"` | Header name (for `HEADER` mode) |
 | `credential_format` | `str` | `"Bearer {}"` | Format string with `{}` placeholder for the credential |
+| `path_pattern` | `str \| None` | `None` | URL path mode: pattern to match in incoming path |
+| `path_replacement` | `str \| None` | `None` | URL path mode: replacement pattern for outgoing path |
+| `query_param_name` | `str \| None` | `None` | Query param mode: parameter name |
 | `env_var` | `str \| None` | `None` | Override env var name for the phantom token |
 
 ---

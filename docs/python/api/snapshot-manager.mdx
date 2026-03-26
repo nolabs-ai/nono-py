@@ -184,17 +184,24 @@ SessionMetadata(
 )
 ```
 
+**Constructor arguments** (read-only after creation):
+
 | Property | Type | Description |
 |----------|------|-------------|
 | `session_id` | `str` | Session identifier |
-| `started` | `str` | ISO 8601 start time |
-| `ended` | `str \| None` | ISO 8601 end time (settable) |
+| `started` | `str` | ISO 8601 start time (set automatically) |
 | `command` | `list[str]` | Command that was executed |
 | `tracked_paths` | `list[str]` | Tracked directories |
-| `snapshot_count` | `int` | Number of snapshots (settable) |
-| `exit_code` | `int \| None` | Child process exit code (settable) |
-| `merkle_roots` | `list[ContentHash]` | Chain of Merkle roots from each snapshot |
-| `network_events` | `list[dict]` | Network audit events (same schema as `ProxyHandle.drain_audit_events()`) |
+
+**Mutable properties** (set after the session runs):
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `ended` | `str \| None` | ISO 8601 end time |
+| `snapshot_count` | `int` | Number of snapshots |
+| `exit_code` | `int \| None` | Child process exit code |
+| `merkle_roots` | `list[ContentHash]` | Chain of Merkle roots from each snapshot (read-only, use `add_merkle_root()`) |
+| `network_events` | `list[dict]` | Network audit events (read-only, use `set_network_events()`) |
 
 | Method | Description |
 |--------|-------------|
