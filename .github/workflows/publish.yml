@@ -1,28 +1,42 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-sdist:
-    name: Build source distribution
+  validate-release:
+    name: Validate release metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Checkout nono library
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: always-further/nono
-          path: nono
+      - name: Extract version from tag
+        id: version
+        run: echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
-      - name: Fix nono path for CI
-        run: sed -i 's|path = "../nono/crates/nono"|path = "nono/crates/nono"|' Cargo.toml
+      - name: Verify package versions match tag
+        if: github.event_name == 'push'
+        env:
+          TAG_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          pyproject_version=$(grep -E '^version = "' pyproject.toml | head -n1 | cut -d '"' -f2)
+          cargo_version=$(grep -E '^version = "' Cargo.toml | head -n1 | cut -d '"' -f2)
+
+          test "$pyproject_version" = "$TAG_VERSION"
+          test "$cargo_version" = "$TAG_VERSION"
+
+  build-sdist:
+    name: Build source distribution
+    needs: validate-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Build sdist
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021 # v1.50.0
@@ -38,6 +52,7 @@ jobs:
 
   build-wheels-linux:
     name: Build wheels (Linux ${{ matrix.arch }})
+    needs: validate-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -51,15 +66,6 @@ jobs:
             target: aarch64
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Checkout nono library
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: always-further/nono
-          path: nono
-
-      - name: Fix nono path for CI
-        run: sed -i 's|path = "../nono/crates/nono"|path = "nono/crates/nono"|' Cargo.toml
 
       - name: Build wheels
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021 # v1.50.0
@@ -82,6 +88,7 @@ jobs:
 
   build-wheels-macos:
     name: Build wheels (macOS ${{ matrix.target }})
+    needs: validate-release
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -90,19 +97,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Checkout nono library
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: always-further/nono
-          path: nono
-
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.12'
-
-      - name: Fix nono path for CI
-        run: sed -i '' 's|path = "../nono/crates/nono"|path = "nono/crates/nono"|' Cargo.toml
 
       - name: Build wheels
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021 # v1.50.0
@@ -120,7 +118,6 @@ jobs:
     name: Publish to PyPI
     needs: [build-sdist, build-wheels-linux, build-wheels-macos]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     environment:
       name: pypi
       url: https://pypi.org/p/nono-py

@@ -22,7 +22,8 @@ help:
 	@echo "  fmt-check    Check formatting"
 	@echo ""
 	@echo "Release targets:"
-	@echo "  release      Cut a release (make release VERSION=0.4.0)"
+	@echo "  release      Cut a release (make release VERSION=0.4.0 NONO_VERSION=0.25.0)"
+	@echo "               or run scripts/release.sh 0.4.0 0.25.0"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  clean        Remove build artifacts"
@@ -103,17 +104,12 @@ clean:
 # CI target - run all checks
 ci: fmt-check lint test
 
-# Release: make release VERSION=0.4.0
+# Release: make release VERSION=0.4.0 NONO_VERSION=0.25.0
 release:
 ifndef VERSION
-	$(error VERSION is required. Usage: make release VERSION=0.4.0)
+	$(error VERSION is required. Usage: make release VERSION=0.4.0 NONO_VERSION=0.25.0)
 endif
-	@echo "Releasing v$(VERSION)..."
-	sed -i '' 's/^version = ".*"/version = "$(VERSION)"/' pyproject.toml
-	sed -i '' 's/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
-	git add pyproject.toml Cargo.toml
-	git commit -m "Bump version to $(VERSION)"
-	git tag v$(VERSION)
-	git push origin main
-	git push origin v$(VERSION)
-	@echo "Released v$(VERSION) - publish workflow will handle PyPI"
+ifndef NONO_VERSION
+	$(error NONO_VERSION is required. Usage: make release VERSION=0.4.0 NONO_VERSION=0.25.0)
+endif
+	./scripts/release.sh "$(VERSION)" "$(NONO_VERSION)"
