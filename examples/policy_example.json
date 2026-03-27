@@ -28,6 +28,21 @@
           "~/.aws"
         ]
       }
+    },
+    "offline_mode": {
+      "description": "Disable outbound network access",
+      "network": {
+        "block": true
+      }
+    },
+    "proxy_web_demo": {
+      "description": "Allow HTTPS CONNECT only to example.com. Other domains such as evil.com are denied by omission from the allowlist.",
+      "network": {
+        "allow_proxy": [
+          "example.com"
+        ],
+        "max_connections": 32
+      }
     }
   }
 }

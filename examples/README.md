@@ -73,7 +73,8 @@ python examples/07_error_handling.py
 ### 09_policy_loading.py
 
 Load a `policy.json` document, resolve named groups into a `CapabilitySet`,
-and inspect the resulting permissions without applying the sandbox.
+and inspect the resulting filesystem and network permissions without applying
+the sandbox.
 
 The matching example policy file lives at `examples/policy_example.json`.
 
@@ -89,6 +90,16 @@ granted directory.
 
 ```bash
 python examples/10_policy_enforced.py
+```
+
+### 12_policy_proxy.py
+
+Resolve a proxy allowlist from `policy_example.json`, start the proxy from
+that JSON-derived config, and demonstrate one allowed HTTPS domain and one
+blocked HTTPS domain.
+
+```bash
+python examples/12_policy_proxy.py
 ```
 
 ## Running Examples

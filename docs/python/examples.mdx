@@ -412,29 +412,13 @@ mgr.restore_to(snapshot_number=0)
 
 ## Network Proxy with Domain Filtering
 
-Control which hosts a sandboxed process can reach:
+Control which hosts a child process can reach through the proxy:
 
 ```python
-from nono_py import ProxyConfig, RouteConfig, InjectMode, start_proxy
+from nono_py import ProxyConfig, start_proxy
 
 config = ProxyConfig(
-    allowed_hosts=["api.openai.com", "*.anthropic.com"],
-    routes=[
-        RouteConfig(
-            prefix="/openai",
-            upstream="https://api.openai.com",
-            credential_key="openai-key",
-            inject_mode=InjectMode.HEADER,
-            credential_format="Bearer {}",
-        ),
-        RouteConfig(
-            prefix="/maps",
-            upstream="https://maps.googleapis.com",
-            credential_key="google-maps-key",
-            inject_mode=InjectMode.QUERY_PARAM,
-            query_param_name="key",
-        ),
-    ],
+    allowed_hosts=["example.com"],
 )
 
 proxy = start_proxy(config)
@@ -447,6 +431,41 @@ for event in proxy.drain_audit_events():
 
 proxy.shutdown()
 ```
+
+## Policy-Driven Network Configuration
+
+Load network policy from JSON using the same field names as nono profiles:
+
+```python
+from nono_py import load_policy, start_proxy
+
+policy = load_policy(
+    """
+    {
+      "groups": {
+        "proxy_web_demo": {
+          "description": "Allow only example.com through the proxy",
+          "network": {
+            "allow_proxy": ["example.com"],
+            "max_connections": 32
+          }
+        }
+      }
+    }
+    """
+)
+
+proxy_config = policy.resolve_proxy_config(["proxy_web_demo"])
+assert proxy_config is not None
+
+proxy = start_proxy(proxy_config)
+print(proxy_config.allowed_hosts)  # ["example.com"]
+proxy.shutdown()
+```
+
+The same resolver also accepts the canonical `allow_domain` key used by the
+main nono crate's profile format. Domains not listed in the allowlist are
+blocked by omission.
 
 ## Testing Sandbox Configurations
 

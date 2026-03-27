@@ -314,39 +314,35 @@ state.permissions   # int (Unix mode bits)
 
 ## Part 3: Policy Schema Extension
 
-Add an optional `proxy` section to the `network` object in profile
-definitions. This is an additive, backwards-compatible change. Profiles
-without `proxy` continue to work unchanged.
+Python policy resolution should follow the same `network` field naming as the
+main nono profile format instead of introducing a nested `network.proxy`
+object. The canonical host-allowlist key is `allow_domain`, with
+`allow_proxy` and `proxy_allow` accepted as aliases for compatibility.
 
 ```json
 "network": {
   "block": false,
-  "proxy": {
-    "allowed_hosts": ["api.openai.com", "*.anthropic.com"],
-    "routes": [
-      {
-        "prefix": "/openai",
-        "upstream": "https://api.openai.com",
-        "credential_key": "openai-key",
-        "inject_mode": "header",
-        "inject_header": "Authorization",
-        "credential_format": "Bearer {}"
-      }
-    ],
-    "max_connections": 256
-  }
+  "allow_domain": ["api.openai.com", "*.anthropic.com"],
+  "max_connections": 256
 }
 ```
 
-The `proxy` object maps directly to `ProxyConfig` fields. The policy
-resolution code would construct a `ProxyConfig` from this section when
-present.
+The Python binding resolves these fields into a `ProxyConfig` when
+`Policy.resolve_proxy_config()` is called.
 
-`external_proxy` is excluded from the policy schema. It is site-specific
-(corporate proxy addresses) and should be configured via environment or a
-separate config path.
+Current Python binding coverage:
 
-Requires bumping `schema_version` in `policy.json` metadata.
+- `block`
+- `allow_domain` plus `allow_proxy` / `proxy_allow` aliases
+- `max_connections`
+- `custom_credentials`
+- `upstream_proxy` / `external_proxy`
+- `upstream_bypass` / `external_proxy_bypass`
+
+Not yet implemented in `nono-py`:
+
+- `network_profile`
+- built-in credential service resolution via `credentials`
 
 ## Rust Source File Layout
 

@@ -5,6 +5,8 @@ description: Top-level functions in nono_py
 
 The `nono_py` module provides functions for applying sandboxes, starting the network proxy, and checking platform support.
 
+It also provides policy-loading helpers for filesystem and network policy resolution.
+
 ## apply
 
 ```python
@@ -227,12 +229,113 @@ proxy.shutdown()
 
 ---
 
+## embedded_policy_json
+
+```python
+embedded_policy_json() -> str
+```
+
+Return the bundled policy JSON document as a raw string.
+
+**Returns:** JSON text for the embedded policy.
+
+### Example
+
+```python
+from nono_py import embedded_policy_json
+
+raw = embedded_policy_json()
+print(raw[:80])
+```
+
+---
+
+## load_policy
+
+```python
+load_policy(json: str) -> Policy
+```
+
+Parse a policy JSON document into a `Policy` object.
+
+**Returns:** `Policy` with group inspection and resolution helpers.
+
+**Raises:**
+- `ValueError` - Invalid policy JSON
+
+### Example
+
+```python
+from nono_py import load_policy
+
+policy = load_policy(
+    """
+    {
+      "groups": {
+        "offline": {
+          "description": "Disable outbound network",
+          "network": { "block": true }
+        },
+        "proxy_web": {
+          "description": "Allow only example.com through the proxy",
+          "network": { "allow_proxy": ["example.com"] }
+        }
+      }
+    }
+    """
+)
+
+print(policy.group_names())
+proxy_config = policy.resolve_proxy_config(["proxy_web"])
+print(proxy_config.allowed_hosts if proxy_config else [])
+```
+
+`Policy.resolve_proxy_config()` follows the same network field naming used by
+the main nono profile format:
+
+- Canonical key: `network.allow_domain`
+- Accepted aliases: `network.allow_proxy`, `network.proxy_allow`
+
+If multiple groups specify different `upstream_proxy` / `external_proxy`
+values, resolution fails with `ValueError` instead of silently overwriting the
+earlier proxy.
+
+---
+
+## load_embedded_policy
+
+```python
+load_embedded_policy() -> Policy
+```
+
+Parse the bundled policy JSON and return it as a `Policy`.
+
+### Example
+
+```python
+from nono_py import load_embedded_policy
+
+policy = load_embedded_policy()
+print("deny_credentials" in policy.group_names())
+```
+
+---
+
 ## Import
 
 All functions are available from the top-level module:
 
 ```python
-from nono_py import apply, start_proxy, sandboxed_exec, is_supported, support_info
+from nono_py import (
+    apply,
+    embedded_policy_json,
+    is_supported,
+    load_embedded_policy,
+    load_policy,
+    sandboxed_exec,
+    start_proxy,
+    support_info,
+)
 ```
 
 ## Related

@@ -240,7 +240,13 @@ impl ExternalProxyConfig {
 #[pyclass]
 #[derive(Clone)]
 pub struct ProxyConfig {
-    inner: RustProxyConfig,
+    pub(crate) inner: RustProxyConfig,
+}
+
+impl ProxyConfig {
+    pub(crate) fn from_inner(inner: RustProxyConfig) -> Self {
+        Self { inner }
+    }
 }
 
 #[pymethods]
