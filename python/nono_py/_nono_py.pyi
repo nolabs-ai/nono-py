@@ -157,6 +157,10 @@ class Policy:
         """Resolve deny.access paths for the given groups."""
         ...
 
+    def resolve_proxy_config(self, group_names: list[str]) -> ProxyConfig | None:
+        """Resolve proxy configuration from network.proxy sections."""
+        ...
+
     def validate_group_exclusions(self, excluded_groups: list[str]) -> None:
         """Reject exclusions that target required groups."""
         ...

@@ -1,8 +1,11 @@
-use crate::CapabilitySet;
+use crate::{proxy::ProxyConfig, CapabilitySet};
 use nono::{AccessMode, CapabilitySource, FsCapability, NonoError, Result as NonoResult};
+use nono_proxy::config::{InjectMode as RustInjectMode, RouteConfig as RustRouteConfig};
+use nono_proxy::ProxyConfig as RustProxyConfig;
 use pyo3::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const EMBEDDED_POLICY_JSON: &str = include_str!("../data/policy.json");
@@ -26,6 +29,8 @@ pub struct Group {
     pub deny: Option<DenyOps>,
     #[serde(default)]
     pub symlink_pairs: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub network: Option<NetworkOps>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -46,6 +51,61 @@ pub struct DenyOps {
     pub unlink: bool,
     #[serde(default)]
     pub unlink_override_for_user_writable: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NetworkOps {
+    #[serde(default)]
+    pub block: bool,
+    #[serde(
+        default,
+        rename = "allow_domain",
+        alias = "allow_proxy",
+        alias = "proxy_allow"
+    )]
+    pub allow_domain: Vec<String>,
+    #[serde(default)]
+    pub credentials: Vec<String>,
+    #[serde(default)]
+    pub custom_credentials: HashMap<String, PolicyRouteConfig>,
+    #[serde(default, rename = "upstream_proxy", alias = "external_proxy")]
+    pub upstream_proxy: Option<String>,
+    #[serde(default, rename = "upstream_bypass", alias = "external_proxy_bypass")]
+    pub upstream_bypass: Vec<String>,
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicyRouteConfig {
+    pub prefix: String,
+    pub upstream: String,
+    #[serde(default)]
+    pub credential_key: Option<String>,
+    #[serde(default)]
+    pub inject_mode: PolicyInjectMode,
+    #[serde(default = "default_inject_header")]
+    pub inject_header: String,
+    #[serde(default = "default_credential_format")]
+    pub credential_format: String,
+    #[serde(default)]
+    pub path_pattern: Option<String>,
+    #[serde(default)]
+    pub path_replacement: Option<String>,
+    #[serde(default)]
+    pub query_param_name: Option<String>,
+    #[serde(default)]
+    pub env_var: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyInjectMode {
+    #[default]
+    Header,
+    UrlPath,
+    QueryParam,
+    BasicAuth,
 }
 
 #[pyclass(name = "Policy")]
@@ -92,6 +152,12 @@ impl Policy {
             .into_iter()
             .map(|path| path.display().to_string())
             .collect())
+    }
+
+    fn resolve_proxy_config(&self, group_names: Vec<String>) -> PyResult<Option<ProxyConfig>> {
+        resolve_proxy_config_impl(&self.inner, &group_names)
+            .map(|config| config.map(ProxyConfig::from_inner))
+            .map_err(crate::to_py_err)
     }
 
     fn validate_group_exclusions(&self, excluded_groups: Vec<String>) -> PyResult<()> {
@@ -184,6 +250,91 @@ pub fn resolve_deny_paths_for_groups(
     };
     let resolved = resolve_groups_impl(policy, group_names, &mut tmp_caps)?;
     Ok(resolved.deny_paths)
+}
+
+pub fn resolve_proxy_config_impl(
+    policy: &RustPolicy,
+    group_names: &[String],
+) -> NonoResult<Option<RustProxyConfig>> {
+    let mut allowed_hosts = Vec::new();
+    let mut seen_hosts = HashSet::new();
+    let mut routes = Vec::new();
+    let mut upstream_proxy: Option<String> = None;
+    let mut upstream_bypass = Vec::new();
+    let mut seen_bypass = HashSet::new();
+    let mut max_connections: Option<usize> = None;
+
+    for name in group_names {
+        let group = policy
+            .groups
+            .get(name)
+            .ok_or_else(|| NonoError::ConfigParse(format!("Unknown policy group: '{}'", name)))?;
+
+        if !group_matches_platform(group) {
+            continue;
+        }
+
+        let Some(network) = &group.network else {
+            continue;
+        };
+
+        for host in &network.allow_domain {
+            if seen_hosts.insert(host.clone()) {
+                allowed_hosts.push(host.clone());
+            }
+        }
+
+        if !network.credentials.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "network.credentials requires built-in network-policy resolution, which nono-py does not expose yet".to_string(),
+            ));
+        }
+
+        routes.extend(network.custom_credentials.values().cloned().map(Into::into));
+
+        if let Some(proxy) = &network.upstream_proxy {
+            upstream_proxy = Some(proxy.clone());
+        }
+
+        for host in &network.upstream_bypass {
+            if seen_bypass.insert(host.clone()) {
+                upstream_bypass.push(host.clone());
+            }
+        }
+
+        if let Some(limit) = network.max_connections {
+            max_connections = Some(match max_connections {
+                Some(current) => current.min(limit),
+                None => limit,
+            });
+        }
+    }
+
+    if allowed_hosts.is_empty()
+        && routes.is_empty()
+        && upstream_proxy.is_none()
+        && upstream_bypass.is_empty()
+        && max_connections.is_none()
+    {
+        return Ok(None);
+    }
+
+    let mut config = RustProxyConfig {
+        allowed_hosts,
+        routes,
+        ..Default::default()
+    };
+    if let Some(address) = upstream_proxy {
+        config.external_proxy = Some(nono_proxy::config::ExternalProxyConfig {
+            address,
+            auth: None,
+            bypass_hosts: upstream_bypass,
+        });
+    }
+    if let Some(limit) = max_connections {
+        config.max_connections = limit;
+    }
+    Ok(Some(config))
 }
 
 pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> NonoResult<()> {
@@ -308,6 +459,12 @@ fn resolve_single_group(
 
         if deny.unlink_override_for_user_writable {
             needs_unlink_overrides = true;
+        }
+    }
+
+    if let Some(network) = &group.network {
+        if network.block {
+            caps.inner.set_network_blocked(true);
         }
     }
 
@@ -525,4 +682,40 @@ fn escape_seatbelt_path(path: &str) -> NonoResult<String> {
         }
     }
     Ok(result)
+}
+
+fn default_inject_header() -> String {
+    String::from("Authorization")
+}
+
+fn default_credential_format() -> String {
+    String::from("Bearer {}")
+}
+
+impl From<PolicyInjectMode> for RustInjectMode {
+    fn from(mode: PolicyInjectMode) -> Self {
+        match mode {
+            PolicyInjectMode::Header => RustInjectMode::Header,
+            PolicyInjectMode::UrlPath => RustInjectMode::UrlPath,
+            PolicyInjectMode::QueryParam => RustInjectMode::QueryParam,
+            PolicyInjectMode::BasicAuth => RustInjectMode::BasicAuth,
+        }
+    }
+}
+
+impl From<PolicyRouteConfig> for RustRouteConfig {
+    fn from(route: PolicyRouteConfig) -> Self {
+        Self {
+            prefix: route.prefix,
+            upstream: route.upstream,
+            credential_key: route.credential_key,
+            inject_mode: route.inject_mode.into(),
+            inject_header: route.inject_header,
+            credential_format: route.credential_format,
+            path_pattern: route.path_pattern,
+            path_replacement: route.path_replacement,
+            query_param_name: route.query_param_name,
+            env_var: route.env_var,
+        }
+    }
 }

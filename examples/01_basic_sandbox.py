@@ -4,7 +4,6 @@
 This example demonstrates the fundamental usage of nono-py:
 creating a capability set, adding permissions, and applying the sandbox.
 
-WARNING: apply() is irreversible! Once called, the sandbox cannot be removed.
 """
 
 import sys

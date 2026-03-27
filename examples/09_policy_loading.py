@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load a policy.json file and resolve groups into a capability set.
+"""Load a policy.json file and resolve filesystem and network policy.
 
 This example is safe to run: it does not call apply().
 """
@@ -29,7 +29,7 @@ def main() -> None:
 
     caps = CapabilitySet()
     resolved = policy.resolve_groups(
-        ["system_tmp_read", "deny_secrets"],
+        ["system_tmp_read", "deny_secrets", "offline_mode"],
         caps,
     )
 
@@ -45,12 +45,17 @@ def main() -> None:
     print()
 
     ctx = QueryContext(caps)
+    proxy_config = policy.resolve_proxy_config(["proxy_web_demo"])
     print("Permission checks:")
     print("  /tmp/example.txt read:", ctx.query_path("/tmp/example.txt", AccessMode.READ))
     print(
         "  ~/.ssh/config read:",
         ctx.query_path(str(Path.home() / ".ssh" / "config"), AccessMode.READ),
     )
+    print("  network:", ctx.query_network())
+    if proxy_config is not None:
+        print("  proxy allowed hosts:", proxy_config.allowed_hosts)
+        print("  proxy note: domains not in the allowlist, such as evil.com, are denied")
 
 
 if __name__ == "__main__":
