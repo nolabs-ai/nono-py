@@ -3,10 +3,6 @@
 <img src="assets/nono-py.png" alt="nono logo" width="500"/>
 </p>
 
-<a href="https://discord.gg/pPcjYzGvbS">
-  <img src="https://img.shields.io/badge/Chat-Join%20Discord-7289da?style=for-the-badge&logo=discord&logoColor=white" alt="Join Discord"/>
-</a>
-
 <p>
   <a href="https://opensource.org/licenses/Apache-2.0">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"/>
