@@ -754,6 +754,7 @@ impl From<PolicyRouteConfig> for RustRouteConfig {
             path_pattern: route.path_pattern,
             path_replacement: route.path_replacement,
             query_param_name: route.query_param_name,
+            proxy: None,
             env_var: route.env_var,
             endpoint_rules: route.endpoint_rules.into_iter().map(Into::into).collect(),
             tls_ca: route.tls_ca,

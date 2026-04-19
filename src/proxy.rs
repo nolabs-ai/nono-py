@@ -137,6 +137,7 @@ impl RouteConfig {
                 path_pattern,
                 path_replacement,
                 query_param_name,
+                proxy: None,
                 env_var,
                 endpoint_rules: endpoint_rules
                     .into_iter()
