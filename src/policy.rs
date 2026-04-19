@@ -744,23 +744,22 @@ impl From<PolicyInjectMode> for RustInjectMode {
 
 impl From<PolicyRouteConfig> for RustRouteConfig {
     fn from(route: PolicyRouteConfig) -> Self {
-        serde_json::from_value(serde_json::json!({
-            "prefix": route.prefix,
-            "upstream": route.upstream,
-            "credential_key": route.credential_key,
-            "inject_mode": RustInjectMode::from(route.inject_mode),
-            "inject_header": route.inject_header,
-            "credential_format": route.credential_format,
-            "path_pattern": route.path_pattern,
-            "path_replacement": route.path_replacement,
-            "query_param_name": route.query_param_name,
-            "proxy": null,
-            "env_var": route.env_var,
-            "endpoint_rules": route.endpoint_rules.into_iter().map(RustEndpointRule::from).collect::<Vec<_>>(),
-            "tls_ca": route.tls_ca,
-            "tls_client_cert": route.tls_client_cert,
-            "tls_client_key": route.tls_client_key,
-        }))
-        .expect("policy route config should match nono-proxy route schema")
+        Self {
+            prefix: route.prefix,
+            upstream: route.upstream,
+            credential_key: route.credential_key,
+            inject_mode: route.inject_mode.into(),
+            inject_header: route.inject_header,
+            credential_format: route.credential_format,
+            path_pattern: route.path_pattern,
+            path_replacement: route.path_replacement,
+            query_param_name: route.query_param_name,
+            proxy: None,
+            env_var: route.env_var,
+            endpoint_rules: route.endpoint_rules.into_iter().map(Into::into).collect(),
+            tls_ca: route.tls_ca,
+            tls_client_cert: route.tls_client_cert,
+            tls_client_key: route.tls_client_key,
+        }
     }
 }

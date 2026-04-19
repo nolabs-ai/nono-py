@@ -127,27 +127,26 @@ impl RouteConfig {
         tls_client_key: Option<String>,
     ) -> Self {
         Self {
-            inner: serde_json::from_value(serde_json::json!({
-                "prefix": prefix,
-                "upstream": upstream,
-                "credential_key": credential_key,
-                "inject_mode": RustInjectMode::from(inject_mode),
-                "inject_header": inject_header,
-                "credential_format": credential_format,
-                "path_pattern": path_pattern,
-                "path_replacement": path_replacement,
-                "query_param_name": query_param_name,
-                "proxy": null,
-                "env_var": env_var,
-                "endpoint_rules": endpoint_rules
+            inner: RustRouteConfig {
+                prefix,
+                upstream,
+                credential_key,
+                inject_mode: inject_mode.into(),
+                inject_header,
+                credential_format,
+                path_pattern,
+                path_replacement,
+                query_param_name,
+                proxy: None,
+                env_var,
+                endpoint_rules: endpoint_rules
                     .into_iter()
                     .map(|(method, path)| RustEndpointRule { method, path })
-                    .collect::<Vec<_>>(),
-                "tls_ca": tls_ca,
-                "tls_client_cert": tls_client_cert,
-                "tls_client_key": tls_client_key,
-            }))
-            .expect("python route config should match nono-proxy route schema"),
+                    .collect(),
+                tls_ca,
+                tls_client_cert,
+                tls_client_key,
+            },
         }
     }
 
