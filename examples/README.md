@@ -102,6 +102,28 @@ blocked HTTPS domain.
 python examples/12_policy_proxy.py
 ```
 
+### 14_audit_to_s3.py
+
+Stream both the proxy audit stream and the supervisor's on-disk
+audit log (`audit-events.ndjson`) to an S3-compatible sink, gzipped
+JSONL with a per-record source tag. Demonstrates command auditing,
+filesystem capability decisions, URL opens, and network events end
+to end. Verifies alpha-scheme chain/leaf/Merkle integrity of the
+on-disk log at the end of the run.
+
+Configurable via env vars (no defaults):
+
+- Real S3: `NONO_S3_BUCKET` (+ `NONO_S3_KEY_PREFIX`, optional
+  `NONO_S3_ENDPOINT_URL`, `NONO_S3_REGION`, ambient AWS credentials).
+- Offline: `NONO_S3_FAKE=1` (in-memory sink, no infrastructure required).
+- Tail an existing CLI session: set `NONO_AUDIT_SESSION_DIR=...`.
+  Otherwise a representative synth log is produced for the demo.
+
+```bash
+NONO_S3_FAKE=1 NONO_S3_KEY_PREFIX=demo \
+  python examples/14_audit_to_s3.py
+```
+
 ## Running Examples
 
 All examples can be run directly:

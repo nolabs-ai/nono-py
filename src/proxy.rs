@@ -139,6 +139,7 @@ impl RouteConfig {
                 query_param_name,
                 proxy: None,
                 env_var,
+                oauth2: None,
                 endpoint_rules: endpoint_rules
                     .into_iter()
                     .map(|(method, path)| RustEndpointRule { method, path })
@@ -320,6 +321,7 @@ impl ProxyConfig {
                 routes: routes.into_iter().map(|r| r.inner).collect(),
                 external_proxy: external_proxy.map(|e| e.inner),
                 max_connections,
+                direct_connect_ports: Vec::new(),
             },
         })
     }

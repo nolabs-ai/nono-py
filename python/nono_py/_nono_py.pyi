@@ -243,19 +243,27 @@ class SandboxState:
 
     def __repr__(self) -> str: ...
 
-class QueryResultAllowed(TypedDict, total=False):
-    """Query result for an allowed operation."""
+class _QueryResultBase(TypedDict):
+    status: str  # "allowed" or "denied" — always set
+    reason: str  # explanation tag — always set
 
-    status: str  # "allowed"
-    reason: str  # "granted_path" or "network_allowed"
+class QueryResultAllowed(_QueryResultBase, total=False):
+    """Query result for an allowed operation.
+
+    ``status`` and ``reason`` are always set; ``granted_path`` and
+    ``access`` are populated only for allowed path queries.
+    """
+
     granted_path: str
     access: str
 
-class QueryResultDenied(TypedDict, total=False):
-    """Query result for a denied operation."""
+class QueryResultDenied(_QueryResultBase, total=False):
+    """Query result for a denied operation.
 
-    status: str  # "denied"
-    reason: str  # "path_not_granted", "insufficient_access", or "network_blocked"
+    ``status`` and ``reason`` are always set; ``granted`` and ``requested``
+    are populated only when ``reason == "insufficient_access"``.
+    """
+
     granted: str
     requested: str
 
@@ -472,8 +480,14 @@ class ProxyConfig:
     def max_connections(self) -> int: ...
     def __repr__(self) -> str: ...
 
-class NetworkAuditEvent(TypedDict, total=False):
-    """A network request observed by the proxy."""
+class NetworkAuditEvent(TypedDict):
+    """A network request observed by the proxy.
+
+    All keys are always present. Nullable fields are populated only for
+    request shapes where they apply (e.g. ``port`` for CONNECT/external,
+    ``method``/``path``/``status`` for reverse-proxy events,
+    ``reason`` for denials).
+    """
 
     timestamp_unix_ms: int
     mode: str  # "connect", "reverse", "external"
@@ -635,12 +649,42 @@ class SessionMetadata:
     def merkle_roots(self) -> list[ContentHash]: ...
     def add_merkle_root(self, root: ContentHash) -> None: ...
     @property
+    def executable_identity(self) -> ExecutableIdentity | None: ...
+    @property
+    def audit_event_count(self) -> int: ...
+    @property
+    def audit_integrity(self) -> AuditIntegritySummary | None: ...
+    @property
+    def audit_attestation(self) -> AuditAttestationSummary | None: ...
+    @property
     def network_events(self) -> list[NetworkAuditEvent]: ...
     def set_network_events(self, events: list[NetworkAuditEvent]) -> None: ...
     def to_json(self) -> str: ...
     @staticmethod
     def from_json(json: str) -> SessionMetadata: ...
     def __repr__(self) -> str: ...
+
+class ExecutableIdentity(TypedDict):
+    """Canonical identity of the executable launched for a session."""
+
+    resolved_path: str
+    sha256: str  # 64-char hex SHA-256
+
+class AuditIntegritySummary(TypedDict):
+    """Append-only audit log integrity metadata."""
+
+    hash_algorithm: str
+    event_count: int
+    chain_head: str  # 64-char hex
+    merkle_root: str  # 64-char hex
+
+class AuditAttestationSummary(TypedDict):
+    """Signed attestation metadata for an audit session."""
+
+    predicate_type: str
+    key_id: str
+    public_key: str  # base64 DER
+    bundle_filename: str
 
 class SnapshotManager:
     """Manages content-addressable filesystem snapshots for a session."""

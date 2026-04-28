@@ -305,11 +305,15 @@ impl SessionMetadata {
                 started: chrono_now_iso8601(),
                 ended: None,
                 command,
+                executable_identity: None,
                 tracked_paths: tracked_paths.into_iter().map(PathBuf::from).collect(),
                 snapshot_count: 0,
                 exit_code: None,
                 merkle_roots: Vec::new(),
                 network_events: Vec::new(),
+                audit_event_count: 0,
+                audit_integrity: None,
+                audit_attestation: None,
             },
         }
     }
@@ -380,6 +384,68 @@ impl SessionMetadata {
     /// Add a Merkle root to the chain.
     fn add_merkle_root(&mut self, root: &ContentHash) {
         self.inner.merkle_roots.push(root.inner);
+    }
+
+    /// Canonical executable identity hashed by the supervisor before launch.
+    ///
+    /// Returns `{"resolved_path": str, "sha256": str}` or `None` if the
+    /// session was not launched through a supervisor that captured it.
+    #[getter]
+    fn executable_identity(&self) -> PyResult<Option<PyObject>> {
+        let Some(id) = self.inner.executable_identity.as_ref() else {
+            return Ok(None);
+        };
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("resolved_path", id.resolved_path.display().to_string())?;
+            dict.set_item("sha256", id.sha256.to_string())?;
+            Ok(Some(dict.into()))
+        })
+    }
+
+    /// Number of audit events captured for this session.
+    #[getter]
+    fn audit_event_count(&self) -> u64 {
+        self.inner.audit_event_count
+    }
+
+    /// Optional integrity summary for the append-only audit log.
+    ///
+    /// Returns `{"hash_algorithm": str, "event_count": int,
+    /// "chain_head": str, "merkle_root": str}` or `None` if integrity
+    /// recording was disabled for this session.
+    #[getter]
+    fn audit_integrity(&self) -> PyResult<Option<PyObject>> {
+        let Some(s) = self.inner.audit_integrity.as_ref() else {
+            return Ok(None);
+        };
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("hash_algorithm", &s.hash_algorithm)?;
+            dict.set_item("event_count", s.event_count)?;
+            dict.set_item("chain_head", s.chain_head.to_string())?;
+            dict.set_item("merkle_root", s.merkle_root.to_string())?;
+            Ok(Some(dict.into()))
+        })
+    }
+
+    /// Optional keyed signature over the audit Merkle root and session context.
+    ///
+    /// Returns `{"predicate_type": str, "key_id": str, "public_key": str,
+    /// "bundle_filename": str}` or `None` if the session was not signed.
+    #[getter]
+    fn audit_attestation(&self) -> PyResult<Option<PyObject>> {
+        let Some(s) = self.inner.audit_attestation.as_ref() else {
+            return Ok(None);
+        };
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("predicate_type", &s.predicate_type)?;
+            dict.set_item("key_id", &s.key_id)?;
+            dict.set_item("public_key", &s.public_key)?;
+            dict.set_item("bundle_filename", &s.bundle_filename)?;
+            Ok(Some(dict.into()))
+        })
     }
 
     /// Network audit events recorded during the session.
