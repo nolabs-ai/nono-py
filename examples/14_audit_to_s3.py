@@ -48,6 +48,7 @@ from nono_py import (
     sandboxed_exec,
     start_proxy,
 )
+from nono_py._nono_py import NetworkAuditEvent
 
 
 class S3AuditDrainer:
@@ -75,7 +76,8 @@ class S3AuditDrainer:
         self._flush_n = flush_every_n
         self._flush_s = flush_every_s
         self._s3 = s3_client
-        self._buf: list[dict[str, Any]] = []
+        self._buf: list[NetworkAuditEvent] = []
+        self._buf_lock = threading.Lock()
         self._last_flush = time.monotonic()
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -99,21 +101,28 @@ class S3AuditDrainer:
             self._stop.wait(self._poll)
 
     def _drain_once(self) -> None:
-        self._buf.extend(self._proxy.drain_audit_events())
+        events = self._proxy.drain_audit_events()
+        if not events:
+            return
+        with self._buf_lock:
+            self._buf.extend(events)
 
     def _should_flush(self) -> bool:
-        if not self._buf:
+        with self._buf_lock:
+            count = len(self._buf)
+        if count == 0:
             return False
         return (
-            len(self._buf) >= self._flush_n
+            count >= self._flush_n
             or (time.monotonic() - self._last_flush) >= self._flush_s
         )
 
     def _flush(self) -> None:
-        if not self._buf:
-            self._last_flush = time.monotonic()
-            return
-        batch, self._buf = self._buf, []
+        with self._buf_lock:
+            if not self._buf:
+                self._last_flush = time.monotonic()
+                return
+            batch, self._buf = self._buf, []
         body = io.BytesIO()
         with gzip.GzipFile(fileobj=body, mode="wb") as gz:
             for event in batch:

@@ -35,9 +35,12 @@ tail_session(session_dir, *, poll_interval_s, stop_event)
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Union
+
+_TAIL_READ_CHUNK = 65536
 
 PathLike = Union[str, Path]
 
@@ -103,10 +106,11 @@ def tail_session(
             return
 
     fh = path.open("r", encoding="utf-8")
+    open_inode = os.fstat(fh.fileno()).st_ino
     try:
         buf = ""
         while not stop.is_set():
-            chunk = fh.read()
+            chunk = fh.read(_TAIL_READ_CHUNK)
             if chunk:
                 buf += chunk
                 while "\n" in buf:
@@ -115,13 +119,26 @@ def tail_session(
                     if not line:
                         continue
                     yield json.loads(line)
-            else:
-                if stop.wait(poll_interval_s):
-                    return
-                if fh.tell() > path.stat().st_size:
-                    fh.close()
-                    fh = path.open("r", encoding="utf-8")
-                    buf = ""
+                continue
+
+            if stop.wait(poll_interval_s):
+                return
+
+            try:
+                disk_stat = path.stat()
+            except FileNotFoundError:
+                # Rotated/moved between reads — wait for it to come back.
+                continue
+
+            rotated = (
+                disk_stat.st_ino != open_inode
+                or fh.tell() > disk_stat.st_size
+            )
+            if rotated:
+                fh.close()
+                fh = path.open("r", encoding="utf-8")
+                open_inode = os.fstat(fh.fileno()).st_ino
+                buf = ""
     finally:
         fh.close()
 

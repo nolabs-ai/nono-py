@@ -134,7 +134,8 @@ class S3AuditDrainer:
 
     @property
     def keys_written(self) -> list[str]:
-        return list(self._keys_written)
+        with self._buf_lock:
+            return list(self._keys_written)
 
     def ingest(self, record: dict[str, Any]) -> None:
         """Push one tagged record into the buffer."""
@@ -190,7 +191,8 @@ class S3AuditDrainer:
             ContentType="application/x-ndjson",
             ContentEncoding="gzip",
         )
-        self._keys_written.append(key)
+        with self._buf_lock:
+            self._keys_written.append(key)
         self._last_flush = time.monotonic()
 
 

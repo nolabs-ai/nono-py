@@ -243,19 +243,27 @@ class SandboxState:
 
     def __repr__(self) -> str: ...
 
-class QueryResultAllowed(TypedDict, total=False):
-    """Query result for an allowed operation."""
+class _QueryResultBase(TypedDict):
+    status: str  # "allowed" or "denied" — always set
+    reason: str  # explanation tag — always set
 
-    status: str  # "allowed"
-    reason: str  # "granted_path" or "network_allowed"
+class QueryResultAllowed(_QueryResultBase, total=False):
+    """Query result for an allowed operation.
+
+    ``status`` and ``reason`` are always set; ``granted_path`` and
+    ``access`` are populated only for allowed path queries.
+    """
+
     granted_path: str
     access: str
 
-class QueryResultDenied(TypedDict, total=False):
-    """Query result for a denied operation."""
+class QueryResultDenied(_QueryResultBase, total=False):
+    """Query result for a denied operation.
 
-    status: str  # "denied"
-    reason: str  # "path_not_granted", "insufficient_access", or "network_blocked"
+    ``status`` and ``reason`` are always set; ``granted`` and ``requested``
+    are populated only when ``reason == "insufficient_access"``.
+    """
+
     granted: str
     requested: str
 
@@ -472,8 +480,14 @@ class ProxyConfig:
     def max_connections(self) -> int: ...
     def __repr__(self) -> str: ...
 
-class NetworkAuditEvent(TypedDict, total=False):
-    """A network request observed by the proxy."""
+class NetworkAuditEvent(TypedDict):
+    """A network request observed by the proxy.
+
+    All keys are always present. Nullable fields are populated only for
+    request shapes where they apply (e.g. ``port`` for CONNECT/external,
+    ``method``/``path``/``status`` for reverse-proxy events,
+    ``reason`` for denials).
+    """
 
     timestamp_unix_ms: int
     mode: str  # "connect", "reverse", "external"
