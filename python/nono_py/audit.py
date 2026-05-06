@@ -140,10 +140,7 @@ def tail_session(
                 # Rotated/moved between reads — wait for it to come back.
                 continue
 
-            rotated = (
-                disk_stat.st_ino != open_inode
-                or fh.tell() > disk_stat.st_size
-            )
+            rotated = disk_stat.st_ino != open_inode or fh.tell() > disk_stat.st_size
             if rotated:
                 fh.close()
                 fh = path.open("r", encoding="utf-8")
@@ -200,9 +197,7 @@ def _hex_to_bytes(hex_str: str) -> bytes:
     except ValueError as e:
         raise VerificationError(f"invalid hex: {hex_str!r}") from e
     if len(b) != 32:
-        raise VerificationError(
-            f"expected 32-byte SHA-256, got {len(b)} bytes from {hex_str!r}"
-        )
+        raise VerificationError(f"expected 32-byte SHA-256, got {len(b)} bytes from {hex_str!r}")
     return b
 
 
@@ -281,9 +276,7 @@ def verify_log(
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as e:
-                raise VerificationError(
-                    f"line {index}: malformed JSON: {e}"
-                ) from e
+                raise VerificationError(f"line {index}: malformed JSON: {e}") from e
 
             expected_seq = len(leaf_hashes)
             seq = record.get("sequence")
@@ -321,9 +314,9 @@ def verify_log(
                 # or floats, but we only reach this branch when event_json
                 # is absent — in which case the leaf hash cannot be
                 # authoritatively verified.
-                event_bytes = json.dumps(
-                    event, separators=(",", ":"), sort_keys=False
-                ).encode("utf-8")
+                event_bytes = json.dumps(event, separators=(",", ":"), sort_keys=False).encode(
+                    "utf-8"
+                )
 
             leaf_hash = _hash_event_alpha(event_bytes)
             rec_leaf = _hex_to_bytes(record["leaf_hash"])
@@ -345,9 +338,7 @@ def verify_log(
             "but a stored integrity summary was supplied"
         )
 
-    computed_merkle_root = (
-        _merkle_root_alpha(leaf_hashes) if leaf_hashes else None
-    )
+    computed_merkle_root = _merkle_root_alpha(leaf_hashes) if leaf_hashes else None
 
     stored_event_count = stored.get("event_count") if stored else None
     stored_chain_head_hex = stored.get("chain_head") if stored else None
@@ -355,9 +346,7 @@ def verify_log(
 
     event_count = len(leaf_hashes)
     event_count_matches = (
-        stored_event_count == event_count
-        if stored_event_count is not None
-        else True
+        stored_event_count == event_count if stored_event_count is not None else True
     )
 
     if stored_chain_head_hex is not None:

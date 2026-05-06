@@ -65,7 +65,7 @@ jobs:
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021 # v1.50.0
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -i python3.9 python3.10 python3.11 python3.12 python3.13
+          args: --release --out dist -i python3.9 python3.10 python3.11 python3.12 python3.13 python3.14
           manylinux: auto
           before-script-linux: |
             if command -v dnf &> /dev/null; then
