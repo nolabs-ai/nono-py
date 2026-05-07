@@ -381,16 +381,9 @@ pub struct ProxyHandle {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
 }
 
-// Rust-level accessors for use from other modules (e.g., CapabilitySet.proxy_only)
 impl ProxyHandle {
     pub(crate) fn port_number(&self) -> u16 {
         self.handle.port
-    }
-
-    pub(crate) fn all_env_vars(&self) -> Vec<(String, String)> {
-        let mut vars = self.handle.env_vars();
-        vars.extend(self.handle.credential_env_vars(&self.config));
-        vars
     }
 }
 
@@ -439,7 +432,9 @@ impl ProxyHandle {
     /// into a single list of (key, value) tuples suitable for passing
     /// directly to ``sandboxed_exec(env=...)``.
     fn sandbox_env(&self) -> Vec<(String, String)> {
-        self.all_env_vars()
+        let mut vars = self.handle.env_vars();
+        vars.extend(self.handle.credential_env_vars(&self.config));
+        vars
     }
 
     /// Drain and return collected network audit events.

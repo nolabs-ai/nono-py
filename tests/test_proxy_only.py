@@ -1,10 +1,10 @@
 """Tests for proxy_only network mode on CapabilitySet."""
 
-import contextlib
 import sys
 
 import pytest
 
+from conftest import add_system_paths
 from nono_py import (
     AccessMode,
     CapabilitySet,
@@ -13,24 +13,16 @@ from nono_py import (
     start_proxy,
 )
 
-_SYSTEM_PATHS = ["/usr", "/bin", "/sbin", "/lib"]
-_MACOS_PATHS = ["/private", "/Library/Frameworks", "/dev"]
 
-
-def _add_system_paths(caps: CapabilitySet) -> None:
-    for sys_path in _SYSTEM_PATHS + _MACOS_PATHS:
-        with contextlib.suppress(FileNotFoundError):
-            caps.allow_path(sys_path, AccessMode.READ)
+@pytest.fixture
+def proxy():
+    p = start_proxy(ProxyConfig(allowed_hosts=["example.com"]))
+    yield p
+    p.shutdown()
 
 
 class TestProxyOnlyCapabilitySet:
     """Unit tests for proxy_only on CapabilitySet."""
-
-    @pytest.fixture
-    def proxy(self):
-        p = start_proxy(ProxyConfig(allowed_hosts=["example.com"]))
-        yield p
-        p.shutdown()
 
     def test_proxy_only_blocks_network(self, proxy) -> None:
         """proxy_only marks network as blocked."""
@@ -75,15 +67,9 @@ class TestProxyOnlyCapabilitySet:
 class TestProxyOnlySandboxedExec:
     """Integration tests for proxy_only with sandboxed_exec."""
 
-    @pytest.fixture
-    def proxy(self):
-        p = start_proxy(ProxyConfig(allowed_hosts=["example.com"]))
-        yield p
-        p.shutdown()
-
     def _make_caps(self, temp_dir, proxy):
         caps = CapabilitySet()
-        _add_system_paths(caps)
+        add_system_paths(caps)
         caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
         caps.proxy_only(proxy)
         return caps
@@ -192,7 +178,7 @@ class TestProxyOnlySandboxedExec:
     def test_block_network_prevents_proxy_access(self, proxy, temp_dir) -> None:
         """Contrast: block_network() prevents reaching the proxy entirely."""
         caps = CapabilitySet()
-        _add_system_paths(caps)
+        add_system_paths(caps)
         caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
         caps.block_network()
 

@@ -303,7 +303,7 @@ impl CapabilitySet {
     /// ensures the child process can only reach the network through the
     /// proxy, which enforces domain-level filtering.
     ///
-    /// Use ``proxy.env_vars()`` to get the environment variables
+    /// Use ``proxy.sandbox_env()`` to get the environment variables
     /// (HTTP_PROXY, HTTPS_PROXY, etc.) to pass to ``sandboxed_exec(env=...)``.
     ///
     /// Args:
