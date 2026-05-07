@@ -60,9 +60,8 @@ def build_caps(workdir: str) -> CapabilitySet:
     # Workspace access
     caps.allow_path(workdir, AccessMode.READ_WRITE)
 
-    # Block direct network — child must go through the proxy
-    caps.block_network()
-
+    # Network is configured via caps.proxy_only(proxy) below —
+    # no need to call block_network() manually.
     return caps
 
 
@@ -104,8 +103,10 @@ def main() -> None:
         print("4. Running sandboxed child")
         caps = build_caps(workspace)
 
-        # Merge proxy env vars for the child
-        env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+        # proxy_only() restricts kernel-level network to only allow
+        # localhost:proxy_port — child must go through the proxy
+        caps.proxy_only(proxy)
+        env = list(proxy.env_vars().items())
 
         # The child will:
         #   a) Modify data.txt

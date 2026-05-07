@@ -296,6 +296,35 @@ impl CapabilitySet {
         self.inner.set_network_blocked(true);
     }
 
+    /// Restrict network to proxy-only mode.
+    ///
+    /// Blocks all outbound network at the kernel level (Landlock on Linux,
+    /// Seatbelt on macOS) except localhost TCP to the proxy's port. This
+    /// ensures the child process can only reach the network through the
+    /// proxy, which enforces domain-level filtering.
+    ///
+    /// Use ``proxy.env_vars()`` to get the environment variables
+    /// (HTTP_PROXY, HTTPS_PROXY, etc.) to pass to ``sandboxed_exec(env=...)``.
+    ///
+    /// Args:
+    ///     proxy: A running ProxyHandle from ``start_proxy()``
+    ///
+    /// Example:
+    ///     >>> proxy = start_proxy(ProxyConfig(allowed_hosts=["example.com"]))
+    ///     >>> caps = CapabilitySet()
+    ///     >>> caps.allow_path("/usr", AccessMode.READ)
+    ///     >>> caps.proxy_only(proxy)
+    ///     >>> env = list(proxy.env_vars().items())
+    ///     >>> result = sandboxed_exec(caps, ["curl", "https://example.com"], env=env)
+    ///     >>> proxy.shutdown()
+    fn proxy_only(&mut self, proxy: &proxy::ProxyHandle) {
+        use nono::NetworkMode;
+        self.inner.set_network_mode_mut(NetworkMode::ProxyOnly {
+            port: proxy.port_number(),
+            bind_ports: Vec::new(),
+        });
+    }
+
     /// Add a raw platform-specific sandbox rule.
     ///
     /// On macOS, this is a Seatbelt S-expression string injected verbatim
@@ -359,11 +388,7 @@ impl CapabilitySet {
 
     fn __repr__(&self) -> String {
         let n_fs = self.inner.fs_capabilities().len();
-        let net = if self.inner.is_network_blocked() {
-            "blocked"
-        } else {
-            "allowed"
-        };
+        let net = format!("{}", self.inner.network_mode());
         format!("CapabilitySet(fs={}, network={})", n_fs, net)
     }
 }
