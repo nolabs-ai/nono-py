@@ -58,15 +58,12 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import (
     IO,
     Any,
-    Dict,
-    Iterator,
-    List,
     Literal,
-    Optional,
     TypedDict,
     Union,
 )
@@ -101,7 +98,7 @@ def _audit_path(session_dir: PathLike) -> Path:
     return Path(session_dir) / AUDIT_EVENTS_FILENAME
 
 
-def iter_session(session_dir: PathLike) -> Iterator[Dict[str, Any]]:
+def iter_session(session_dir: PathLike) -> Iterator[dict[str, Any]]:
     """Yield every record currently in the session's audit log, then stop.
 
     Raises:
@@ -121,8 +118,8 @@ def tail_session(
     session_dir: PathLike,
     *,
     poll_interval_s: float,
-    stop_event: Optional[threading.Event] = None,
-) -> Iterator[Dict[str, Any]]:
+    stop_event: threading.Event | None = None,
+) -> Iterator[dict[str, Any]]:
     """Yield existing records, then follow the file for new appends.
 
     Behaves like ``tail -F``: tolerates the file not yet existing
@@ -170,10 +167,7 @@ def tail_session(
                 # Rotated/moved between reads — wait for it to come back.
                 continue
 
-            rotated = (
-                disk_stat.st_ino != open_inode
-                or fh.tell() > disk_stat.st_size
-            )
+            rotated = disk_stat.st_ino != open_inode or fh.tell() > disk_stat.st_size
             if rotated:
                 fh.close()
                 fh = path.open("r", encoding="utf-8")
@@ -194,7 +188,7 @@ def _hash_event_alpha(event_bytes: bytes) -> bytes:
     return h.digest()
 
 
-def _hash_chain_alpha(previous: Optional[bytes], leaf: bytes) -> bytes:
+def _hash_chain_alpha(previous: bytes | None, leaf: bytes) -> bytes:
     h = hashlib.sha256()
     h.update(CHAIN_DOMAIN_ALPHA)
     h.update(previous if previous is not None else b"\x00" * 32)
@@ -202,12 +196,12 @@ def _hash_chain_alpha(previous: Optional[bytes], leaf: bytes) -> bytes:
     return h.digest()
 
 
-def _merkle_root_alpha(leaves: List[bytes]) -> bytes:
+def _merkle_root_alpha(leaves: list[bytes]) -> bytes:
     if not leaves:
         return hashlib.sha256(b"").digest()
     level = list(leaves)
     while len(level) > 1:
-        nxt: List[bytes] = []
+        nxt: list[bytes] = []
         for i in range(0, len(level), 2):
             left = level[i]
             if i + 1 == len(level):
@@ -230,17 +224,15 @@ def _hex_to_bytes(hex_str: str) -> bytes:
     except ValueError as e:
         raise VerificationError(f"invalid hex: {hex_str!r}") from e
     if len(b) != 32:
-        raise VerificationError(
-            f"expected 32-byte SHA-256, got {len(b)} bytes from {hex_str!r}"
-        )
+        raise VerificationError(f"expected 32-byte SHA-256, got {len(b)} bytes from {hex_str!r}")
     return b
 
 
 def verify_log(
     session_dir: PathLike,
     *,
-    stored: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    stored: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Verify the alpha-scheme integrity of a session's audit log.
 
     Walks ``audit-events.ndjson`` line by line, recomputing each
@@ -298,9 +290,9 @@ def verify_log(
             except (OSError, json.JSONDecodeError):
                 stored = None
 
-    previous_chain: Optional[bytes] = None
-    leaf_hashes: List[bytes] = []
-    computed_chain_head: Optional[bytes] = None
+    previous_chain: bytes | None = None
+    leaf_hashes: list[bytes] = []
+    computed_chain_head: bytes | None = None
     missing_canonical_event_json = False
 
     with path.open("r", encoding="utf-8") as fh:
@@ -311,9 +303,7 @@ def verify_log(
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as e:
-                raise VerificationError(
-                    f"line {index}: malformed JSON: {e}"
-                ) from e
+                raise VerificationError(f"line {index}: malformed JSON: {e}") from e
 
             expected_seq = len(leaf_hashes)
             seq = record.get("sequence")
@@ -351,9 +341,9 @@ def verify_log(
                 # or floats, but we only reach this branch when event_json
                 # is absent — in which case the leaf hash cannot be
                 # authoritatively verified.
-                event_bytes = json.dumps(
-                    event, separators=(",", ":"), sort_keys=False
-                ).encode("utf-8")
+                event_bytes = json.dumps(event, separators=(",", ":"), sort_keys=False).encode(
+                    "utf-8"
+                )
 
             leaf_hash = _hash_event_alpha(event_bytes)
             rec_leaf = _hex_to_bytes(record["leaf_hash"])
@@ -375,9 +365,7 @@ def verify_log(
             "but a stored integrity summary was supplied"
         )
 
-    computed_merkle_root = (
-        _merkle_root_alpha(leaf_hashes) if leaf_hashes else None
-    )
+    computed_merkle_root = _merkle_root_alpha(leaf_hashes) if leaf_hashes else None
 
     stored_event_count = stored.get("event_count") if stored else None
     stored_chain_head_hex = stored.get("chain_head") if stored else None
@@ -385,9 +373,7 @@ def verify_log(
 
     event_count = len(leaf_hashes)
     event_count_matches = (
-        stored_event_count == event_count
-        if stored_event_count is not None
-        else True
+        stored_event_count == event_count if stored_event_count is not None else True
     )
 
     if stored_chain_head_hex is not None:
@@ -431,7 +417,7 @@ class CapabilityRequestPayload(TypedDict, total=False):
     request_id: str
     path: str
     access: str  # "Read" | "Write" | "ReadWrite"
-    reason: Optional[str]
+    reason: str | None
     child_pid: int
     session_id: str
 
@@ -474,17 +460,17 @@ class NetworkAuditEventPayload(TypedDict):
     mode: str  # "connect" | "reverse" | "external"
     decision: str  # "allow" | "deny"
     target: str
-    port: Optional[int]
-    method: Optional[str]
-    path: Optional[str]
-    status: Optional[int]
-    reason: Optional[str]
+    port: int | None
+    method: str | None
+    path: str | None
+    status: int | None
+    reason: str | None
 
 
 class SessionStartedEvent(TypedDict):
     type: Literal["session_started"]
     started: str
-    command: List[str]
+    command: list[str]
 
 
 class SessionEndedEvent(TypedDict):
@@ -502,7 +488,7 @@ class UrlOpenEvent(TypedDict):
     type: Literal["url_open"]
     request: UrlOpenRequestPayload
     success: bool
-    error: Optional[str]
+    error: str | None
 
 
 class NetworkEvent(TypedDict):
@@ -523,14 +509,14 @@ class AuditEventRecord(TypedDict):
     """One line of ``audit-events.ndjson``."""
 
     sequence: int
-    prev_chain: Optional[str]  # 64-char hex
+    prev_chain: str | None  # 64-char hex
     leaf_hash: str  # 64-char hex
     chain_hash: str  # 64-char hex
-    event_json: Optional[str]
+    event_json: str | None
     event: AuditEvent
 
 
-def session_started(*, started: str, command: List[str]) -> SessionStartedEvent:
+def session_started(*, started: str, command: list[str]) -> SessionStartedEvent:
     """Build a ``session_started`` event payload."""
     return {"type": "session_started", "started": started, "command": list(command)}
 
@@ -562,8 +548,8 @@ def capability_decision(
     decision: ApprovalDecision,
     backend: str,
     duration_ms: int,
-    request_id: Optional[str] = None,
-    reason: Optional[str] = None,
+    request_id: str | None = None,
+    reason: str | None = None,
 ) -> CapabilityDecisionEvent:
     """Build a ``capability_decision`` event payload.
 
@@ -593,8 +579,8 @@ def url_open(
     child_pid: int,
     session_id: str,
     success: bool,
-    error: Optional[str] = None,
-    request_id: Optional[str] = None,
+    error: str | None = None,
+    request_id: str | None = None,
 ) -> UrlOpenEvent:
     """Build a ``url_open`` event payload."""
     request: UrlOpenRequestPayload = {
@@ -612,11 +598,11 @@ def network(
     mode: str,
     decision: str,
     target: str,
-    port: Optional[int] = None,
-    method: Optional[str] = None,
-    path: Optional[str] = None,
-    status: Optional[int] = None,
-    reason: Optional[str] = None,
+    port: int | None = None,
+    method: str | None = None,
+    path: str | None = None,
+    status: int | None = None,
+    reason: str | None = None,
 ) -> NetworkEvent:
     """Build a ``network`` event payload."""
     inner: NetworkAuditEventPayload = {
@@ -646,29 +632,34 @@ class AlphaRecorder:
     ``AuditRecorder`` semantics in ``nono-cli/src/audit_integrity.rs`` —
     use this when synthesising or replaying a log without the CLI.
 
-    Threading: not safe for concurrent ``record()`` calls.
+    Thread safety: an internal :class:`threading.Lock` serialises
+    ``record()`` / ``write()`` / property reads, so a single recorder
+    instance can be shared across threads without corrupting the
+    sequence number or chain hash. Note that when multiple threads
+    share a file handle in :meth:`write`, the lock guarantees only that
+    each record's hashing + serialisation + ``fh.write`` + ``fh.flush``
+    runs as one critical section — interleaving with writes that bypass
+    the recorder is still the caller's problem.
     """
 
     def __init__(self) -> None:
         self._next_seq = 0
-        self._prev_chain: Optional[bytes] = None
+        self._prev_chain: bytes | None = None
+        self._lock = threading.Lock()
 
     @property
     def sequence(self) -> int:
         """Sequence number that will be assigned to the next record."""
-        return self._next_seq
+        with self._lock:
+            return self._next_seq
 
     @property
-    def chain_head(self) -> Optional[str]:
+    def chain_head(self) -> str | None:
         """Hex-encoded chain head after the last record, or None if empty."""
-        return self._prev_chain.hex() if self._prev_chain is not None else None
+        with self._lock:
+            return self._prev_chain.hex() if self._prev_chain is not None else None
 
-    def record(self, event: AuditEvent) -> AuditEventRecord:
-        """Return one fully-hashed alpha record for ``event``.
-
-        Canonical event JSON is stored on the record so that downstream
-        :func:`verify_log` can rehash without ambiguity.
-        """
+    def _build_record_locked(self, event: AuditEvent) -> AuditEventRecord:
         event_json = json.dumps(event, separators=(",", ":"))
         leaf = _hash_event_alpha(event_json.encode("utf-8"))
         chain = _hash_chain_alpha(self._prev_chain, leaf)
@@ -684,12 +675,27 @@ class AlphaRecorder:
         self._prev_chain = chain
         return rec
 
+    def record(self, event: AuditEvent) -> AuditEventRecord:
+        """Return one fully-hashed alpha record for ``event``.
+
+        Canonical event JSON is stored on the record so that downstream
+        :func:`verify_log` can rehash without ambiguity.
+        """
+        with self._lock:
+            return self._build_record_locked(event)
+
     def write(self, fh: IO[str], event: AuditEvent) -> AuditEventRecord:
-        """Build a record, append one JSONL line to ``fh``, flush, return it."""
-        rec = self.record(event)
-        fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
-        fh.flush()
-        return rec
+        """Build a record, append one JSONL line to ``fh``, flush, return it.
+
+        The build + ``fh.write`` + ``fh.flush`` runs under the recorder's
+        lock so a single shared file handle stays consistent across
+        concurrent writers.
+        """
+        with self._lock:
+            rec = self._build_record_locked(event)
+            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            fh.flush()
+            return rec
 
 
 __all__ = [

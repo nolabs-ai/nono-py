@@ -1,4 +1,12 @@
-.PHONY: build build-release dev install test lint fmt fmt-check clean help release
+.PHONY: build build-release dev install test lint lint-rust lint-python lint-pyright \
+        fmt fmt-rust fmt-python fmt-check fmt-check-rust fmt-check-python \
+        typecheck clean help release ci
+
+# Pin cargo-driven steps to the venv interpreter so `make` works regardless
+# of which Python is on the system PATH (pyo3-ffi 0.23 caps at 3.13, so a
+# system 3.14 will otherwise reject the build).
+VENV_PYTHON := $(CURDIR)/.venv/bin/python
+export PYO3_PYTHON ?= $(VENV_PYTHON)
 
 # Default target
 help:
@@ -17,9 +25,13 @@ help:
 	@echo "  test-quick   Run tests without rebuilding"
 	@echo ""
 	@echo "Quality targets:"
-	@echo "  lint         Run linters (clippy + mypy)"
+	@echo "  lint         Run all linters (clippy + ruff + mypy + pyright)"
+	@echo "  lint-rust    cargo clippy -D warnings"
+	@echo "  lint-python  ruff check + mypy"
+	@echo "  lint-pyright pyright (Python type check, strict)"
+	@echo "  typecheck    Run mypy and pyright together"
 	@echo "  fmt          Format code (rustfmt + ruff)"
-	@echo "  fmt-check    Check formatting"
+	@echo "  fmt-check    Check formatting (rustfmt + ruff, no changes)"
 	@echo ""
 	@echo "Release targets:"
 	@echo "  release      Cut a release (make release VERSION=0.4.0)"
@@ -55,12 +67,22 @@ test-quick:
 lint-rust:
 	cargo clippy -- -D warnings
 
-# Run Python type checker
+# Run Python lint (ruff check) + type check (mypy)
 lint-python:
+	uv run ruff check python/ tests/
 	uv run mypy python/nono_py
 
+# Run pyright over the project (uses pyrightconfig if present, else defaults)
+lint-pyright:
+	uv run pyright
+
+# Run mypy + pyright together
+typecheck:
+	uv run mypy python/nono_py
+	uv run pyright
+
 # Run all linters
-lint: lint-rust lint-python
+lint: lint-rust lint-python lint-pyright
 
 # Format Rust code
 fmt-rust:
