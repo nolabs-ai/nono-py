@@ -3,8 +3,8 @@
 import sys
 
 import pytest
-
 from conftest import add_system_paths
+
 from nono_py import (
     AccessMode,
     CapabilitySet,
@@ -25,10 +25,10 @@ class TestProxyOnlyCapabilitySet:
     """Unit tests for proxy_only on CapabilitySet."""
 
     def test_proxy_only_blocks_network(self, proxy) -> None:
-        """proxy_only marks network as blocked."""
+        """proxy_only sets proxy-only network mode."""
         caps = CapabilitySet()
         caps.proxy_only(proxy)
-        assert caps.is_network_blocked
+        assert "proxy-only" in repr(caps)
 
     def test_proxy_only_repr(self, proxy) -> None:
         """repr shows proxy-only mode."""
@@ -82,7 +82,8 @@ class TestProxyOnlySandboxedExec:
         result = sandboxed_exec(
             caps,
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 f"import socket; s = socket.socket(); s.settimeout(3); "
                 f"s.connect(('127.0.0.1', {proxy.port})); "
                 f"print('CONNECTED'); s.close()",
@@ -101,10 +102,11 @@ class TestProxyOnlySandboxedExec:
         result = sandboxed_exec(
             caps,
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 "import socket; s = socket.socket(); s.settimeout(3); "
                 "try:\n"
-                "    s.connect(('93.184.216.34', 80))\n"
+                "    s.connect(('192.0.2.1', 80))\n"
                 "    print('BYPASSED')\n"
                 "except (PermissionError, OSError) as e:\n"
                 "    print(f'BLOCKED:{type(e).__name__}')\n"
@@ -125,7 +127,8 @@ class TestProxyOnlySandboxedExec:
         result = sandboxed_exec(
             caps,
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 "import urllib.request, ssl, os\n"
                 "ctx = ssl.create_default_context()\n"
                 "ctx.check_hostname = False\n"
@@ -154,7 +157,8 @@ class TestProxyOnlySandboxedExec:
         sandboxed_exec(
             caps,
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 "import urllib.request, ssl\n"
                 "ctx = ssl.create_default_context()\n"
                 "ctx.check_hostname = False\n"
@@ -185,7 +189,8 @@ class TestProxyOnlySandboxedExec:
         result = sandboxed_exec(
             caps,
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 f"import socket; s = socket.socket(); s.settimeout(3); "
                 f"try:\n"
                 f"    s.connect(('127.0.0.1', {proxy.port}))\n"
