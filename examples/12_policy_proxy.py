@@ -10,13 +10,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+from proxy_demo_support import PROXY_DEMO_CHILD_CODE, build_proxy_child_caps
+
 from nono_py import (
     is_supported,
     load_policy,
     sandboxed_exec,
     start_proxy,
 )
-from proxy_demo_support import PROXY_DEMO_CHILD_CODE, build_proxy_child_caps
 
 
 def main() -> None:
