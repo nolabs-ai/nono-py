@@ -87,7 +87,6 @@ offline mode does not.
 """
 
 import gzip
-import hashlib
 import io
 import json
 import os
@@ -302,111 +301,61 @@ class _FakeS3Sink:
         raise KeyError(f"s3://{Bucket}/{Key}")
 
 
-def _hash_event(event_bytes: bytes) -> bytes:
-    h = hashlib.sha256()
-    h.update(audit.EVENT_DOMAIN_ALPHA)
-    h.update(event_bytes)
-    return h.digest()
-
-
-def _hash_chain(prev: Optional[bytes], leaf: bytes) -> bytes:
-    h = hashlib.sha256()
-    h.update(audit.CHAIN_DOMAIN_ALPHA)
-    h.update(prev if prev is not None else b"\x00" * 32)
-    h.update(leaf)
-    return h.digest()
-
-
 def _synthesise_session_log(session_dir: Path, command: list[str]) -> None:
     """Write a minimal but algorithm-valid ``audit-events.ndjson``.
 
-    Produces one record of every supported event type so the demo
-    exercises command auditing, capability decisions, URL opens,
-    network events, and session lifecycle without needing a real
-    nono CLI session. The records are written progressively so the
-    tailer demonstrates live streaming.
-    """
+    Uses :class:`nono_py.audit.AlphaRecorder` and the per-variant
+    builder helpers, so the example doubles as a usage demo for the
+    audit primitives.
 
-    def _write(events: list[dict[str, Any]]) -> None:
+    Produces one record per supported event type — exercises command
+    auditing, capability decisions, URL opens, network events, and
+    session lifecycle without needing a real nono CLI session. Records
+    are written progressively so the tailer demonstrates live streaming.
+    """
+    pid = 4242
+    session_id = "sess-demo"
+
+    events: list[audit.AuditEvent] = [
+        audit.session_started(started="2026-04-28T00:00:00Z", command=command),
+        audit.capability_decision(
+            timestamp="2026-04-28T00:00:01Z",
+            path="/etc/passwd",
+            access="Read",
+            child_pid=pid,
+            session_id=session_id,
+            decision=audit.approval_denied("policy: outside grant"),
+            backend="PolicyApproval",
+            duration_ms=2,
+            reason="demo: agent attempted to read system file",
+        ),
+        audit.url_open(
+            url="https://example.com/oauth/callback",
+            child_pid=pid,
+            session_id=session_id,
+            success=True,
+        ),
+        audit.network(
+            timestamp_unix_ms=int(time.time() * 1000),
+            mode="connect",
+            decision="deny",
+            target="evil.example",
+            port=443,
+            reason="host evil.example is not in the allowlist",
+        ),
+        audit.session_ended(ended="2026-04-28T00:00:02Z", exit_code=0),
+    ]
+
+    def _write() -> None:
         path = session_dir / audit.AUDIT_EVENTS_FILENAME
-        prev: Optional[bytes] = None
+        recorder = audit.AlphaRecorder()
         with path.open("w", encoding="utf-8") as fh:
-            for seq, ev in enumerate(events):
-                event_json = json.dumps(ev, separators=(",", ":"))
-                leaf = _hash_event(event_json.encode("utf-8"))
-                chain = _hash_chain(prev, leaf)
-                record = {
-                    "sequence": seq,
-                    "prev_chain": prev.hex() if prev is not None else None,
-                    "leaf_hash": leaf.hex(),
-                    "chain_hash": chain.hex(),
-                    "event_json": event_json,
-                    "event": ev,
-                }
-                fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-                fh.flush()
-                prev = chain
+            for ev in events:
+                recorder.write(fh, ev)
                 # Stagger so the tailer sees them as appends, not bulk read.
                 time.sleep(0.15)
 
-    events: list[dict[str, Any]] = [
-        {
-            "type": "session_started",
-            "started": "2026-04-28T00:00:00Z",
-            "command": command,
-        },
-        {
-            "type": "capability_decision",
-            "entry": {
-                "timestamp": "2026-04-28T00:00:01Z",
-                "request": {
-                    "request_id": "req-demo-1",
-                    "path": "/etc/passwd",
-                    "access": "Read",
-                    "reason": "demo: agent attempted to read system file",
-                    "child_pid": 4242,
-                    "session_id": "sess-demo",
-                },
-                "decision": {"Denied": {"reason": "policy: outside grant"}},
-                "backend": "PolicyApproval",
-                "duration_ms": 2,
-            },
-        },
-        {
-            "type": "url_open",
-            "request": {
-                "request_id": "req-demo-2",
-                "url": "https://example.com/oauth/callback",
-                "child_pid": 4242,
-                "session_id": "sess-demo",
-            },
-            "success": True,
-            "error": None,
-        },
-        {
-            "type": "network",
-            "event": {
-                "timestamp_unix_ms": int(time.time() * 1000),
-                "mode": "connect",
-                "decision": "deny",
-                "target": "evil.example",
-                "port": 443,
-                "method": None,
-                "path": None,
-                "status": None,
-                "reason": "host evil.example is not in the allowlist",
-            },
-        },
-        {
-            "type": "session_ended",
-            "ended": "2026-04-28T00:00:02Z",
-            "exit_code": 0,
-        },
-    ]
-
-    threading.Thread(
-        target=_write, args=(events,), name="nono-synth-log", daemon=True
-    ).start()
+    threading.Thread(target=_write, name="nono-synth-log", daemon=True).start()
 
 
 def _require_env(name: str) -> str:

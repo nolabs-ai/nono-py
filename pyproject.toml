@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nono-py"
-version = "0.8.0"
+version = "0.9.0"
 description = "Python bindings for nono capability-based sandboxing"
 readme = "README.md"
 authors = [{ name = "Luke Hinds", email = "lukehinds@gmail.com" }]
@@ -31,7 +31,13 @@ Issues = "https://github.com/always-further/nono-py/issues"
 Changelog = "https://github.com/always-further/nono-py/releases"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "mypy>=1.10", "ruff>=0.4", "maturin>=1,<2"]
+dev = [
+    "pytest>=8",
+    "mypy>=1.10",
+    "pyright>=1.1",
+    "ruff>=0.4",
+    "maturin>=1,<2",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
