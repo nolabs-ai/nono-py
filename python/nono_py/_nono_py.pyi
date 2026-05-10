@@ -104,6 +104,17 @@ class CapabilitySet:
         """Block all outbound network access."""
         ...
 
+    def proxy_only(self, proxy: ProxyHandle) -> None:
+        """Restrict network to proxy-only mode.
+
+        Blocks all outbound network except localhost TCP to the proxy's port.
+        Use ``proxy.sandbox_env()`` to get the env vars for ``sandboxed_exec``.
+
+        Args:
+            proxy: A running ProxyHandle from ``start_proxy()``
+        """
+        ...
+
     def platform_rule(self, rule: str) -> None:
         """Add a raw platform-specific sandbox rule.
 
@@ -513,6 +524,10 @@ class ProxyHandle:
 
     def credential_env_vars(self) -> dict[str, str]:
         """Environment variables for reverse proxy credential routes."""
+        ...
+
+    def sandbox_env(self) -> list[tuple[str, str]]:
+        """All env vars for a sandboxed child (env_vars + credential_env_vars combined)."""
         ...
 
     def drain_audit_events(self) -> list[NetworkAuditEvent]:

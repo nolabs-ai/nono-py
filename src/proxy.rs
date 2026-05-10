@@ -381,6 +381,12 @@ pub struct ProxyHandle {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
 }
 
+impl ProxyHandle {
+    pub(crate) fn port_number(&self) -> u16 {
+        self.handle.port
+    }
+}
+
 #[pymethods]
 impl ProxyHandle {
     /// The port the proxy is listening on.
@@ -417,6 +423,18 @@ impl ProxyHandle {
             }
             Ok(dict.into())
         })
+    }
+
+    /// All environment variables needed for a sandboxed child process.
+    ///
+    /// Combines ``env_vars()`` (HTTP_PROXY, HTTPS_PROXY, etc.) with
+    /// ``credential_env_vars()`` (route-specific base URLs and tokens)
+    /// into a single list of (key, value) tuples suitable for passing
+    /// directly to ``sandboxed_exec(env=...)``.
+    fn sandbox_env(&self) -> Vec<(String, String)> {
+        let mut vars = self.handle.env_vars();
+        vars.extend(self.handle.credential_env_vars(&self.config));
+        vars
     }
 
     /// Drain and return collected network audit events.
