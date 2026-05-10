@@ -22,6 +22,10 @@ def add_system_paths(caps: CapabilitySet) -> None:
     py_prefix = str(pathlib.Path(sys.executable).resolve().parent.parent)
     with contextlib.suppress(FileNotFoundError):
         caps.allow_path(py_prefix, AccessMode.READ)
+    # Also allow the venv prefix (pyvenv.cfg, venv site-packages) when running in a venv.
+    if sys.prefix != py_prefix:
+        with contextlib.suppress(FileNotFoundError):
+            caps.allow_path(sys.prefix, AccessMode.READ)
 
 
 @pytest.fixture

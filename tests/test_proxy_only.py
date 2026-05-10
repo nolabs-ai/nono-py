@@ -92,8 +92,9 @@ class TestProxyOnlySandboxedExec:
             env=env,
             timeout_secs=10.0,
         )
-        assert result.exit_code == 0
-        assert b"CONNECTED" in result.stdout
+        stderr = result.stderr.decode(errors="replace")
+        assert result.exit_code == 0, f"exit={result.exit_code} stderr={stderr!r}"
+        assert b"CONNECTED" in result.stdout, f"stderr={stderr!r}"
 
     def test_child_cannot_connect_direct(self, proxy, temp_dir) -> None:
         """Child process cannot bypass the proxy and connect directly."""
@@ -104,19 +105,22 @@ class TestProxyOnlySandboxedExec:
             [
                 sys.executable,
                 "-c",
-                "import socket; s = socket.socket(); s.settimeout(3); "
+                "import socket\n"
+                "s = socket.socket()\n"
+                "s.settimeout(3)\n"
                 "try:\n"
                 "    s.connect(('192.0.2.1', 80))\n"
                 "    print('BYPASSED')\n"
                 "except (PermissionError, OSError) as e:\n"
                 "    print(f'BLOCKED:{type(e).__name__}')\n"
                 "finally:\n"
-                "    s.close()",
+                "    s.close()\n",
             ],
             cwd=str(temp_dir),
             timeout_secs=10.0,
         )
-        assert b"BLOCKED" in result.stdout
+        stderr = result.stderr.decode(errors="replace")
+        assert b"BLOCKED" in result.stdout, f"stderr={stderr!r}"
         assert b"BYPASSED" not in result.stdout
 
     def test_proxy_filters_blocked_domain(self, proxy, temp_dir) -> None:
@@ -147,7 +151,8 @@ class TestProxyOnlySandboxedExec:
             env=env,
             timeout_secs=10.0,
         )
-        assert b"PROXY-DENIED" in result.stdout
+        stderr = result.stderr.decode(errors="replace")
+        assert b"PROXY-DENIED" in result.stdout, f"stderr={stderr!r}"
 
     def test_audit_events_recorded(self, proxy, temp_dir) -> None:
         """Proxy records audit events for connection attempts."""
@@ -174,9 +179,9 @@ class TestProxyOnlySandboxedExec:
         )
 
         events = proxy.drain_audit_events()
-        assert len(events) >= 1
+        assert len(events) >= 1, "no audit events recorded"
         deny_events = [e for e in events if e["decision"] == "deny"]
-        assert len(deny_events) >= 1
+        assert len(deny_events) >= 1, f"all events: {events}"
         assert any("google.com" in e["target"] for e in deny_events)
 
     def test_block_network_prevents_proxy_access(self, proxy, temp_dir) -> None:
@@ -191,16 +196,19 @@ class TestProxyOnlySandboxedExec:
             [
                 sys.executable,
                 "-c",
-                f"import socket; s = socket.socket(); s.settimeout(3); "
+                "import socket\n"
+                "s = socket.socket()\n"
+                "s.settimeout(3)\n"
                 f"try:\n"
                 f"    s.connect(('127.0.0.1', {proxy.port}))\n"
                 f"    print('CONNECTED')\n"
                 f"except (PermissionError, OSError):\n"
                 f"    print('BLOCKED')\n"
                 f"finally:\n"
-                f"    s.close()",
+                f"    s.close()\n",
             ],
             cwd=str(temp_dir),
             timeout_secs=10.0,
         )
-        assert b"BLOCKED" in result.stdout
+        stderr = result.stderr.decode(errors="replace")
+        assert b"BLOCKED" in result.stdout, f"stderr={stderr!r}"
