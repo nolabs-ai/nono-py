@@ -134,7 +134,7 @@ pub fn sandboxed_exec(
     let stderr_pipe = create_pipe()?;
 
     // Release the GIL during fork+wait so other Python threads can proceed
-    py.allow_threads(|| do_fork_sandbox_exec(&ctx, &stdout_pipe, &stderr_pipe))
+    py.detach(|| do_fork_sandbox_exec(&ctx, &stdout_pipe, &stderr_pipe))
 }
 
 /// Prepare all data needed for fork+exec while allocation is safe.

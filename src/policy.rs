@@ -133,13 +133,13 @@ pub enum PolicyInjectMode {
     BasicAuth,
 }
 
-#[pyclass(name = "Policy")]
+#[pyclass(name = "Policy", skip_from_py_object)]
 #[derive(Clone)]
 pub struct Policy {
     pub(crate) inner: RustPolicy,
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct ResolvedPolicy {
     pub(crate) names: Vec<String>,

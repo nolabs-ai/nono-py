@@ -100,7 +100,7 @@ pub(crate) fn audit_event_to_py_dict<'py>(
 // ---------------------------------------------------------------------------
 
 /// Credential injection method for reverse proxy routes.
-#[pyclass(frozen, eq, hash)]
+#[pyclass(frozen, eq, hash, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InjectMode {
     /// Inject credential as an HTTP header (default).
@@ -165,7 +165,7 @@ impl From<RustInjectMode> for InjectMode {
 // ---------------------------------------------------------------------------
 
 /// Configuration for a reverse proxy credential injection route.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct RouteConfig {
     inner: RustRouteConfig,
@@ -319,7 +319,7 @@ impl RouteConfig {
 // ---------------------------------------------------------------------------
 
 /// Configuration for enterprise proxy passthrough.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct ExternalProxyConfig {
     inner: RustExternalProxyConfig,
@@ -359,7 +359,7 @@ impl ExternalProxyConfig {
 // ---------------------------------------------------------------------------
 
 /// Configuration for the nono network filtering proxy.
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct ProxyConfig {
     pub(crate) inner: RustProxyConfig,
@@ -487,14 +487,14 @@ impl ProxyHandle {
     ///
     /// Returns a dict containing HTTP_PROXY, HTTPS_PROXY, NO_PROXY,
     /// NONO_PROXY_TOKEN, and their lowercase variants.
-    fn env_vars(&self) -> PyResult<PyObject> {
+    fn env_vars(&self) -> PyResult<Py<PyAny>> {
         let vars = self.handle.env_vars();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
             for (k, v) in vars {
                 dict.set_item(k, v)?;
             }
-            Ok(dict.into())
+            Ok(dict.unbind().into_any())
         })
     }
 
@@ -502,14 +502,14 @@ impl ProxyHandle {
     ///
     /// Returns a dict containing base URL overrides and phantom tokens
     /// for routes where credentials were successfully loaded.
-    fn credential_env_vars(&self) -> PyResult<PyObject> {
+    fn credential_env_vars(&self) -> PyResult<Py<PyAny>> {
         let vars = self.handle.credential_env_vars(&self.config);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
             for (k, v) in vars {
                 dict.set_item(k, v)?;
             }
-            Ok(dict.into())
+            Ok(dict.unbind().into_any())
         })
     }
 
@@ -530,15 +530,15 @@ impl ProxyHandle {
     /// Returns a list of dicts, each representing a network request
     /// observed by the proxy. Events are removed from the internal
     /// buffer once drained.
-    fn drain_audit_events(&self) -> PyResult<PyObject> {
+    fn drain_audit_events(&self) -> PyResult<Py<PyAny>> {
         let events = self.handle.drain_audit_events();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let list = pyo3::types::PyList::empty(py);
             for event in events {
                 let dict = audit_event_to_py_dict(py, &event)?;
                 list.append(dict)?;
             }
-            Ok(list.into())
+            Ok(list.unbind().into_any())
         })
     }
 
@@ -578,7 +578,7 @@ pub fn start_proxy(py: Python<'_>, config: &ProxyConfig) -> PyResult<ProxyHandle
     let rust_config = config.inner.clone();
     let config_copy = config.inner.clone();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
 

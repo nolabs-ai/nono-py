@@ -51,7 +51,7 @@ fn to_py_err(e: NonoError) -> PyErr {
 /// - `READ`: Read-only access
 /// - `WRITE`: Write-only access
 /// - `READ_WRITE`: Both read and write access
-#[pyclass(frozen, eq, hash)]
+#[pyclass(frozen, eq, hash, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessMode {
     #[pyo3(name = "READ")]
@@ -111,7 +111,7 @@ impl From<RustAccessMode> for AccessMode {
 /// - `user()`: Added directly by the user
 /// - `group(name)`: Resolved from a named policy group
 /// - `system()`: System-level path required for execution
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct CapabilitySource {
     inner: RustCapabilitySource,
@@ -167,7 +167,7 @@ impl CapabilitySource {
 ///     access: The access mode granted (READ, WRITE, or READ_WRITE)
 ///     is_file: True if this grants access to a single file, False for directory
 ///     source: The origin of this capability
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct FsCapability {
     inner: RustFsCapability,
@@ -237,7 +237,7 @@ impl FsCapability {
 ///     >>> caps.allow_file("/etc/hosts", AccessMode.READ)
 ///     >>> caps.block_network()
 ///     >>> apply(caps)  # Irreversible!
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct CapabilitySet {
     inner: RustCapabilitySet,
@@ -451,7 +451,7 @@ impl SupportInfo {
 ///     >>> # Later...
 ///     >>> state = SandboxState.from_json(json_str)
 ///     >>> caps = state.to_caps()
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct SandboxState {
     inner: RustSandboxState,
@@ -569,22 +569,22 @@ impl QueryContext {
     ///     Dict with 'status' ('allowed' or 'denied') and reason details:
     ///     - For allowed: 'reason', 'granted_path', 'access'
     ///     - For denied: 'reason' (and possibly 'granted', 'requested')
-    fn query_path(&self, path: &str, mode: AccessMode) -> PyResult<PyObject> {
+    fn query_path(&self, path: &str, mode: AccessMode) -> PyResult<Py<PyAny>> {
         let result = self.inner.query_path(Path::new(path), mode.into());
-        Python::with_gil(|py| query_result_to_dict(py, &result))
+        Python::attach(|py| query_result_to_dict(py, &result))
     }
 
     /// Query whether network access is permitted.
     ///
     /// Returns:
     ///     Dict with 'status' ('allowed' or 'denied') and 'reason'
-    fn query_network(&self) -> PyResult<PyObject> {
+    fn query_network(&self) -> PyResult<Py<PyAny>> {
         let result = self.inner.query_network();
-        Python::with_gil(|py| query_result_to_dict(py, &result))
+        Python::attach(|py| query_result_to_dict(py, &result))
     }
 }
 
-fn query_result_to_dict(py: Python<'_>, result: &nono::query::QueryResult) -> PyResult<PyObject> {
+fn query_result_to_dict(py: Python<'_>, result: &nono::query::QueryResult) -> PyResult<Py<PyAny>> {
     let dict = pyo3::types::PyDict::new(py);
     match result {
         nono::query::QueryResult::Allowed(reason) => {
@@ -620,7 +620,7 @@ fn query_result_to_dict(py: Python<'_>, result: &nono::query::QueryResult) -> Py
             }
         }
     }
-    Ok(dict.into())
+    Ok(dict.unbind().into_any())
 }
 
 // ---------------------------------------------------------------------------

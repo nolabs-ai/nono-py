@@ -36,7 +36,7 @@ dev = [
     "mypy>=1.10",
     "pyright>=1.1",
     "ruff>=0.4",
-    "maturin>=1,<2",
+    "maturin>=1.13.2",
 ]
 
 [tool.maturin]
@@ -80,7 +80,7 @@ known-first-party = ["nono_py"]
 
 [dependency-groups]
 dev = [
-    "maturin>=1.11.5",
+    "maturin>=1.13.2",
     "pytest>=8",
     "mypy>=1.10",
     "ruff>=0.4",
