@@ -46,6 +46,10 @@ module-name = "nono_py._nono_py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "smoke: fast sanity check that core functionality is reachable",
+    "integration: multi-step end-to-end scenario",
+]
 
 [tool.mypy]
 python_version = "3.9"
