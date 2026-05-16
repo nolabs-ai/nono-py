@@ -3,8 +3,7 @@
         typecheck clean help release ci
 
 # Pin cargo-driven steps to the venv interpreter so `make` works regardless
-# of which Python is on the system PATH (pyo3-ffi 0.23 caps at 3.13, so a
-# system 3.14 will otherwise reject the build).
+# of which Python is on the system PATH.
 VENV_PYTHON := $(CURDIR)/.venv/bin/python
 export PYO3_PYTHON ?= $(VENV_PYTHON)
 

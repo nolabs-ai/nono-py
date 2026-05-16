@@ -750,7 +750,7 @@ impl From<PolicyRouteConfig> for RustRouteConfig {
             credential_key: route.credential_key,
             inject_mode: route.inject_mode.into(),
             inject_header: route.inject_header,
-            credential_format: route.credential_format,
+            credential_format: Some(route.credential_format),
             path_pattern: route.path_pattern,
             path_replacement: route.path_replacement,
             query_param_name: route.query_param_name,

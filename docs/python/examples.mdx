@@ -30,6 +30,7 @@ Sandbox a data processing script with separate input/output directories:
 ```python
 from nono_py import CapabilitySet, AccessMode, apply
 import json
+import os
 
 def process_data(input_dir: str, output_dir: str):
     # Configure sandbox
@@ -349,7 +350,7 @@ caps = CapabilitySet()
 caps.allow_path("/workspace", AccessMode.READ_WRITE)
 caps.block_network()  # Direct network blocked; proxy provides filtered access
 
-env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+env = proxy.sandbox_env()
 result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
 
 # 4. Capture changes and audit trail

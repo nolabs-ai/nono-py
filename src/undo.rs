@@ -457,29 +457,7 @@ impl SessionMetadata {
         Python::with_gil(|py| {
             let list = pyo3::types::PyList::empty(py);
             for event in &self.inner.network_events {
-                let dict = pyo3::types::PyDict::new(py);
-                dict.set_item("timestamp_unix_ms", event.timestamp_unix_ms)?;
-                dict.set_item(
-                    "mode",
-                    match event.mode {
-                        NetworkAuditMode::Connect => "connect",
-                        NetworkAuditMode::Reverse => "reverse",
-                        NetworkAuditMode::External => "external",
-                    },
-                )?;
-                dict.set_item(
-                    "decision",
-                    match event.decision {
-                        NetworkAuditDecision::Allow => "allow",
-                        NetworkAuditDecision::Deny => "deny",
-                    },
-                )?;
-                dict.set_item("target", &event.target)?;
-                dict.set_item("port", event.port)?;
-                dict.set_item("method", event.method.as_deref())?;
-                dict.set_item("path", event.path.as_deref())?;
-                dict.set_item("status", event.status)?;
-                dict.set_item("reason", event.reason.as_deref())?;
+                let dict = crate::proxy::audit_event_to_py_dict(py, event)?;
                 list.append(dict)?;
             }
             Ok(list.into())
@@ -505,6 +483,7 @@ impl SessionMetadata {
                         .as_str()
                     {
                         "connect" => NetworkAuditMode::Connect,
+                        "connect_intercept" => NetworkAuditMode::ConnectIntercept,
                         "reverse" => NetworkAuditMode::Reverse,
                         "external" => NetworkAuditMode::External,
                         other => {
@@ -535,6 +514,71 @@ impl SessionMetadata {
                     path: dict.get_item("path")?.and_then(|v| v.extract().ok()),
                     status: dict.get_item("status")?.and_then(|v| v.extract().ok()),
                     reason: dict.get_item("reason")?.and_then(|v| v.extract().ok()),
+                    route_id: dict.get_item("route_id")?.and_then(|v| v.extract().ok()),
+                    auth_mechanism: dict
+                        .get_item("auth_mechanism")?
+                        .and_then(|v| v.extract::<String>().ok())
+                        .map(|s| match s.as_str() {
+                            "proxy_authorization" => {
+                                nono::undo::NetworkAuditAuthMechanism::ProxyAuthorization
+                            }
+                            "phantom_header" => {
+                                nono::undo::NetworkAuditAuthMechanism::PhantomHeader
+                            }
+                            "phantom_path" => nono::undo::NetworkAuditAuthMechanism::PhantomPath,
+                            "phantom_query" => nono::undo::NetworkAuditAuthMechanism::PhantomQuery,
+                            _ => nono::undo::NetworkAuditAuthMechanism::ProxyAuthorization,
+                        }),
+                    auth_outcome: dict
+                        .get_item("auth_outcome")?
+                        .and_then(|v| v.extract::<String>().ok())
+                        .map(|s| match s.as_str() {
+                            "succeeded" => nono::undo::NetworkAuditAuthOutcome::Succeeded,
+                            "failed" => nono::undo::NetworkAuditAuthOutcome::Failed,
+                            _ => nono::undo::NetworkAuditAuthOutcome::Failed,
+                        }),
+                    managed_credential_active: dict
+                        .get_item("managed_credential_active")?
+                        .and_then(|v| v.extract().ok()),
+                    injection_mode: dict
+                        .get_item("injection_mode")?
+                        .and_then(|v| v.extract::<String>().ok())
+                        .map(|s| match s.as_str() {
+                            "header" => nono::undo::NetworkAuditInjectionMode::Header,
+                            "url_path" => nono::undo::NetworkAuditInjectionMode::UrlPath,
+                            "query_param" => nono::undo::NetworkAuditInjectionMode::QueryParam,
+                            "basic_auth" => nono::undo::NetworkAuditInjectionMode::BasicAuth,
+                            "oauth2" => nono::undo::NetworkAuditInjectionMode::OAuth2,
+                            _ => nono::undo::NetworkAuditInjectionMode::Header,
+                        }),
+                    denial_category: dict
+                        .get_item("denial_category")?
+                        .and_then(|v| v.extract::<String>().ok())
+                        .map(|s| match s.as_str() {
+                            "authentication_failed" => {
+                                nono::undo::NetworkAuditDenialCategory::AuthenticationFailed
+                            }
+                            "endpoint_policy" => {
+                                nono::undo::NetworkAuditDenialCategory::EndpointPolicy
+                            }
+                            "managed_credential_unavailable" => {
+                                nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable
+                            }
+                            "host_denied" => nono::undo::NetworkAuditDenialCategory::HostDenied,
+                            "intercept_handshake_failed" => {
+                                nono::undo::NetworkAuditDenialCategory::InterceptHandshakeFailed
+                            }
+                            "upstream_connect_failed" => {
+                                nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed
+                            }
+                            "connect_bypasses_l7" => {
+                                nono::undo::NetworkAuditDenialCategory::ConnectBypassesL7
+                            }
+                            "external_proxy_rejected" => {
+                                nono::undo::NetworkAuditDenialCategory::ExternalProxyRejected
+                            }
+                            _ => nono::undo::NetworkAuditDenialCategory::HostDenied,
+                        }),
                 });
             }
             self.inner.network_events = rust_events;

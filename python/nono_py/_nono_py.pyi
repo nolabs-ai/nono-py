@@ -425,11 +425,15 @@ class RouteConfig:
         credential_key: str | None = None,
         inject_mode: InjectMode = InjectMode.HEADER,
         inject_header: str = "Authorization",
-        credential_format: str = "Bearer {}",
+        credential_format: str | None = None,
         path_pattern: str | None = None,
         path_replacement: str | None = None,
         query_param_name: str | None = None,
         env_var: str | None = None,
+        endpoint_rules: list[tuple[str, str]] = ...,
+        tls_ca: str | None = None,
+        tls_client_cert: str | None = None,
+        tls_client_key: str | None = None,
     ) -> None: ...
     @property
     def prefix(self) -> str: ...
@@ -442,7 +446,7 @@ class RouteConfig:
     @property
     def inject_header(self) -> str: ...
     @property
-    def credential_format(self) -> str: ...
+    def credential_format(self) -> str | None: ...
     @property
     def path_pattern(self) -> str | None: ...
     @property
@@ -451,6 +455,14 @@ class RouteConfig:
     def query_param_name(self) -> str | None: ...
     @property
     def env_var(self) -> str | None: ...
+    @property
+    def endpoint_rules(self) -> list[tuple[str, str]]: ...
+    @property
+    def tls_ca(self) -> str | None: ...
+    @property
+    def tls_client_cert(self) -> str | None: ...
+    @property
+    def tls_client_key(self) -> str | None: ...
     def __repr__(self) -> str: ...
 
 class ExternalProxyConfig:
@@ -478,6 +490,8 @@ class ProxyConfig:
         bind_addr: str = "127.0.0.1",
         bind_port: int = 0,
         max_connections: int = 256,
+        intercept_ca_dir: str | None = None,
+        intercept_parent_ca_pems: bytes | None = None,
     ) -> None: ...
     @property
     def bind_addr(self) -> str: ...
@@ -501,7 +515,7 @@ class NetworkAuditEvent(TypedDict):
     """
 
     timestamp_unix_ms: int
-    mode: str  # "connect", "reverse", "external"
+    mode: str  # "connect", "connect_intercept", "reverse", "external"
     decision: str  # "allow", "deny"
     target: str
     port: int | None
@@ -509,6 +523,12 @@ class NetworkAuditEvent(TypedDict):
     path: str | None
     status: int | None
     reason: str | None
+    route_id: str | None
+    auth_mechanism: str | None
+    auth_outcome: str | None
+    managed_credential_active: bool | None
+    injection_mode: str | None
+    denial_category: str | None
 
 class ProxyHandle:
     """Handle to a running nono proxy instance."""

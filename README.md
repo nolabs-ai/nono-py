@@ -1,7 +1,6 @@
 <div align="center">
 
 <img src="assets/nono-py.png" alt="nono logo" width="500"/>
-</p>
 
 <p>
   <a href="https://opensource.org/licenses/Apache-2.0">
@@ -116,7 +115,7 @@ config = ProxyConfig(
 proxy = start_proxy(config)
 
 # Inject proxy env vars into sandboxed child
-env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+env = proxy.sandbox_env()
 result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
 
 # Audit trail
@@ -148,13 +147,32 @@ for change in changes:
 mgr.restore_to(snapshot_number=0)
 ```
 
+### Audit Trail
+
+Append-only, Merkle-chained audit logging with tamper detection:
+
+```python
+from nono_py.audit import AlphaRecorder, verify_log, iter_session, session_started, session_ended
+
+recorder = AlphaRecorder()
+with open("audit-events.ndjson", "w") as f:
+    recorder.write(f, session_started(started="2026-01-01T00:00:00Z", command=["agent"]))
+    recorder.write(f, session_ended(ended="2026-01-01T00:05:00Z", exit_code=0))
+
+# Verify integrity — detects any tampering
+result = verify_log("/path/to/session")
+assert result["records_verified"]
+```
+
 ### Other Classes
 
 - `QueryContext` - Check permissions without applying the sandbox
 - `SandboxState` - Serialize/restore capability sets as JSON
 - `SupportInfo` - Platform support details
-- `Policy` - Load and resolve `policy.json` documents
+- `Policy` / `ResolvedPolicy` - Load and resolve `policy.json` documents
 - `SessionMetadata` - Session audit trail with Merkle roots and network events
+- `ExecResult` - Result of `sandboxed_exec` (stdout, stderr, exit_code)
+- `InjectMode` - Credential injection method enum
 
 ### Functions
 
@@ -163,6 +181,8 @@ mgr.restore_to(snapshot_number=0)
 - `start_proxy(config)` - Start network filtering proxy
 - `is_supported()` / `support_info()` - Platform support
 - `load_policy(json)` / `load_embedded_policy()` - Policy loading
+- `embedded_policy_json()` - Raw embedded policy JSON
+- `validate_deny_overlaps(paths, caps)` - Validate deny paths against capabilities
 
 ## Platform Support
 

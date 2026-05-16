@@ -7,8 +7,8 @@ name = "nono-py"
 version = "0.9.0"
 description = "Python bindings for nono capability-based sandboxing"
 readme = "README.md"
-authors = [{ name = "Luke Hinds", email = "lukehinds@gmail.com" }]
-requires-python = ">=3.9"
+authors = [{ name = "Luke Hinds", email = "luke@alwaysfurther.ai" }]
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 keywords = ["sandbox", "security", "capability", "landlock", "seatbelt"]
 classifiers = [
@@ -52,11 +52,11 @@ markers = [
 ]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 strict = true
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]

@@ -15,6 +15,8 @@ ProxyConfig(
     bind_addr: str = "127.0.0.1",
     bind_port: int = 0,
     max_connections: int = 256,
+    intercept_ca_dir: str | None = None,
+    intercept_parent_ca_pems: bytes | None = None,
 )
 ```
 
@@ -28,6 +30,8 @@ Configuration for the nono network filtering proxy.
 | `bind_addr` | `str` | `"127.0.0.1"` | Address to bind the proxy to. |
 | `bind_port` | `int` | `0` | Port to bind. 0 = OS-assigned ephemeral port. |
 | `max_connections` | `int` | `256` | Maximum concurrent connections. 0 = unlimited. |
+| `intercept_ca_dir` | `str \| None` | `None` | Directory containing CA certificates for TLS interception (ConnectIntercept mode). |
+| `intercept_parent_ca_pems` | `bytes \| None` | `None` | Parent CA PEM bytes for generating interception certificates. |
 
 ### Example
 
@@ -58,11 +62,15 @@ RouteConfig(
     credential_key: str | None = None,
     inject_mode: InjectMode = InjectMode.HEADER,
     inject_header: str = "Authorization",
-    credential_format: str = "Bearer {}",
+    credential_format: str | None = None,
     path_pattern: str | None = None,
     path_replacement: str | None = None,
     query_param_name: str | None = None,
     env_var: str | None = None,
+    endpoint_rules: list[tuple[str, str]] = [],
+    tls_ca: str | None = None,
+    tls_client_cert: str | None = None,
+    tls_client_key: str | None = None,
 )
 ```
 
@@ -75,11 +83,15 @@ Configuration for a reverse proxy credential injection route. When the sandboxed
 | `credential_key` | `str \| None` | `None` | OS keyring account name for the credential |
 | `inject_mode` | `InjectMode` | `HEADER` | How to inject the credential |
 | `inject_header` | `str` | `"Authorization"` | Header name (for `HEADER` mode) |
-| `credential_format` | `str` | `"Bearer {}"` | Format string with `{}` placeholder for the credential |
+| `credential_format` | `str \| None` | `None` | Format string with `{credential}` placeholder (e.g., `"Bearer {credential}"`) |
 | `path_pattern` | `str \| None` | `None` | URL path mode: pattern to match in incoming path |
 | `path_replacement` | `str \| None` | `None` | URL path mode: replacement pattern for outgoing path |
 | `query_param_name` | `str \| None` | `None` | Query param mode: parameter name |
 | `env_var` | `str \| None` | `None` | Override env var name for the phantom token |
+| `endpoint_rules` | `list[tuple[str, str]]` | `[]` | Per-endpoint method/path allow rules (e.g., `[("POST", "/v1/chat/completions")]`) |
+| `tls_ca` | `str \| None` | `None` | Custom CA certificate PEM for upstream TLS verification |
+| `tls_client_cert` | `str \| None` | `None` | Client certificate PEM for mutual TLS |
+| `tls_client_key` | `str \| None` | `None` | Client private key PEM for mutual TLS |
 
 ---
 
@@ -116,9 +128,31 @@ Environment variables to inject into the sandboxed child: `HTTP_PROXY`, `HTTPS_P
 
 Per-route base URL overrides and phantom tokens (e.g., `OPENAI_BASE_URL`, `OPENAI_API_KEY`). Only includes routes where credentials were loaded from the keyring.
 
+#### `sandbox_env() -> list[tuple[str, str]]`
+
+Convenience method combining `env_vars()` and `credential_env_vars()` into a single list of `(key, value)` tuples, ready to pass directly to `sandboxed_exec(env=...)`.
+
 #### `drain_audit_events() -> list[dict]`
 
-Drain and return collected network audit events. Each dict contains: `timestamp_unix_ms`, `mode`, `decision`, `target`, `port`, `method`, `path`, `status`, `reason`.
+Drain and return collected network audit events. Each dict contains:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `timestamp_unix_ms` | `int` | Event timestamp |
+| `mode` | `str` | `"connect"`, `"connect_intercept"`, `"reverse"`, `"external"` |
+| `decision` | `str` | `"allow"` or `"deny"` |
+| `target` | `str` | Hostname or service |
+| `port` | `int \| None` | Target port |
+| `method` | `str \| None` | HTTP method (reverse proxy) |
+| `path` | `str \| None` | Request path (reverse proxy) |
+| `status` | `int \| None` | Upstream response status |
+| `reason` | `str \| None` | Denial reason |
+| `route_id` | `str \| None` | Matched route prefix |
+| `auth_mechanism` | `str \| None` | `"proxy_authorization"`, `"phantom_header"`, `"phantom_path"`, `"phantom_query"` |
+| `auth_outcome` | `str \| None` | `"succeeded"` or `"failed"` |
+| `managed_credential_active` | `bool \| None` | Whether a managed credential was used |
+| `injection_mode` | `str \| None` | `"header"`, `"url_path"`, `"query_param"`, `"basic_auth"`, `"oauth2"` |
+| `denial_category` | `str \| None` | `"host_denied"`, `"endpoint_policy"`, `"authentication_failed"`, etc. |
 
 #### `shutdown() -> None`
 
@@ -130,7 +164,7 @@ Signal the proxy to shut down gracefully.
 proxy = start_proxy(config)
 
 # Pass to sandboxed child
-env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+env = proxy.sandbox_env()
 result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
 
 # Review what happened

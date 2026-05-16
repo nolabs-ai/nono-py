@@ -2,8 +2,8 @@
 name = "nono-py"
 version = "0.9.0"
 edition = "2021"
-rust-version = "1.80"
-authors = ["Luke Hinds <lukehinds@gmail.com>"]
+rust-version = "1.95"
+authors = ["Luke Hinds <luke@alwaysfurther.ai>"]
 license = "Apache-2.0"
 description = "Python bindings for nono capability-based sandboxing library"
 publish = false
@@ -13,9 +13,9 @@ name = "_nono_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-nono = "0.50.0"
-nono-proxy = "0.50.0"
-pyo3 = { version = "0.23", features = ["extension-module"] }
+nono = "0.55.0"
+nono-proxy = "0.55.0"
+pyo3 = { version = "0.25", features = ["extension-module"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
