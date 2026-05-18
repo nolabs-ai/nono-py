@@ -4,6 +4,7 @@
 //! `ProxyHandle`, and the `start_proxy()` function. The proxy runs on a
 //! background tokio runtime and is controlled synchronously from Python.
 
+use nono::undo::{NetworkAuditDecision, NetworkAuditMode};
 use nono_proxy::config::{
     EndpointRule as RustEndpointRule, ExternalProxyConfig as RustExternalProxyConfig,
     InjectMode as RustInjectMode, RouteConfig as RustRouteConfig,
@@ -13,6 +14,86 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::net::IpAddr;
 use std::sync::Mutex;
+
+pub(crate) fn audit_event_to_py_dict<'py>(
+    py: Python<'py>,
+    event: &nono::undo::NetworkAuditEvent,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyDict>> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("timestamp_unix_ms", event.timestamp_unix_ms)?;
+    dict.set_item(
+        "mode",
+        match event.mode {
+            NetworkAuditMode::Connect => "connect",
+            NetworkAuditMode::ConnectIntercept => "connect_intercept",
+            NetworkAuditMode::Reverse => "reverse",
+            NetworkAuditMode::External => "external",
+        },
+    )?;
+    dict.set_item(
+        "decision",
+        match event.decision {
+            NetworkAuditDecision::Allow => "allow",
+            NetworkAuditDecision::Deny => "deny",
+        },
+    )?;
+    dict.set_item("target", &event.target)?;
+    dict.set_item("port", event.port)?;
+    dict.set_item("method", event.method.as_deref())?;
+    dict.set_item("path", event.path.as_deref())?;
+    dict.set_item("status", event.status)?;
+    dict.set_item("reason", event.reason.as_deref())?;
+    dict.set_item("route_id", event.route_id.as_deref())?;
+    dict.set_item(
+        "auth_mechanism",
+        event.auth_mechanism.as_ref().map(|m| match m {
+            nono::undo::NetworkAuditAuthMechanism::ProxyAuthorization => "proxy_authorization",
+            nono::undo::NetworkAuditAuthMechanism::PhantomHeader => "phantom_header",
+            nono::undo::NetworkAuditAuthMechanism::PhantomPath => "phantom_path",
+            nono::undo::NetworkAuditAuthMechanism::PhantomQuery => "phantom_query",
+        }),
+    )?;
+    dict.set_item(
+        "auth_outcome",
+        event.auth_outcome.as_ref().map(|o| match o {
+            nono::undo::NetworkAuditAuthOutcome::Succeeded => "succeeded",
+            nono::undo::NetworkAuditAuthOutcome::Failed => "failed",
+        }),
+    )?;
+    dict.set_item("managed_credential_active", event.managed_credential_active)?;
+    dict.set_item(
+        "injection_mode",
+        event.injection_mode.as_ref().map(|m| match m {
+            nono::undo::NetworkAuditInjectionMode::Header => "header",
+            nono::undo::NetworkAuditInjectionMode::UrlPath => "url_path",
+            nono::undo::NetworkAuditInjectionMode::QueryParam => "query_param",
+            nono::undo::NetworkAuditInjectionMode::BasicAuth => "basic_auth",
+            nono::undo::NetworkAuditInjectionMode::OAuth2 => "oauth2",
+        }),
+    )?;
+    dict.set_item(
+        "denial_category",
+        event.denial_category.as_ref().map(|c| match c {
+            nono::undo::NetworkAuditDenialCategory::AuthenticationFailed => "authentication_failed",
+            nono::undo::NetworkAuditDenialCategory::EndpointPolicy => "endpoint_policy",
+            nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable => {
+                "managed_credential_unavailable"
+            }
+            nono::undo::NetworkAuditDenialCategory::HostDenied => "host_denied",
+            nono::undo::NetworkAuditDenialCategory::InterceptHandshakeFailed => {
+                "intercept_handshake_failed"
+            }
+            nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed => {
+                "upstream_connect_failed"
+            }
+            nono::undo::NetworkAuditDenialCategory::ConnectBypassesL7 => "connect_bypasses_l7",
+            nono::undo::NetworkAuditDenialCategory::ExternalProxyRejected => {
+                "external_proxy_rejected"
+            }
+        }),
+    )?;
+    Ok(dict)
+}
 
 // ---------------------------------------------------------------------------
 // InjectMode
@@ -99,7 +180,7 @@ impl RouteConfig {
         credential_key = None,
         inject_mode = InjectMode::Header,
         inject_header = String::from("Authorization"),
-        credential_format = String::from("Bearer {}"),
+        credential_format = None,
         path_pattern = None,
         path_replacement = None,
         query_param_name = None,
@@ -116,7 +197,7 @@ impl RouteConfig {
         credential_key: Option<String>,
         inject_mode: InjectMode,
         inject_header: String,
-        credential_format: String,
+        credential_format: Option<String>,
         path_pattern: Option<String>,
         path_replacement: Option<String>,
         query_param_name: Option<String>,
@@ -177,8 +258,8 @@ impl RouteConfig {
     }
 
     #[getter]
-    fn credential_format(&self) -> &str {
-        &self.inner.credential_format
+    fn credential_format(&self) -> Option<&str> {
+        self.inner.credential_format.as_deref()
     }
 
     #[getter]
@@ -300,7 +381,10 @@ impl ProxyConfig {
         bind_addr = String::from("127.0.0.1"),
         bind_port = 0,
         max_connections = 256,
+        intercept_ca_dir = None,
+        intercept_parent_ca_pems = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         allowed_hosts: Vec<String>,
         routes: Vec<RouteConfig>,
@@ -308,6 +392,8 @@ impl ProxyConfig {
         bind_addr: String,
         bind_port: u16,
         max_connections: usize,
+        intercept_ca_dir: Option<String>,
+        intercept_parent_ca_pems: Option<Vec<u8>>,
     ) -> PyResult<Self> {
         let addr: IpAddr = bind_addr
             .parse()
@@ -322,6 +408,8 @@ impl ProxyConfig {
                 external_proxy: external_proxy.map(|e| e.inner),
                 max_connections,
                 direct_connect_ports: Vec::new(),
+                intercept_ca_dir: intercept_ca_dir.map(std::path::PathBuf::from),
+                intercept_parent_ca_pems,
             },
         })
     }
@@ -447,29 +535,7 @@ impl ProxyHandle {
         Python::with_gil(|py| {
             let list = pyo3::types::PyList::empty(py);
             for event in events {
-                let dict = pyo3::types::PyDict::new(py);
-                dict.set_item("timestamp_unix_ms", event.timestamp_unix_ms)?;
-                dict.set_item(
-                    "mode",
-                    match event.mode {
-                        nono::undo::NetworkAuditMode::Connect => "connect",
-                        nono::undo::NetworkAuditMode::Reverse => "reverse",
-                        nono::undo::NetworkAuditMode::External => "external",
-                    },
-                )?;
-                dict.set_item(
-                    "decision",
-                    match event.decision {
-                        nono::undo::NetworkAuditDecision::Allow => "allow",
-                        nono::undo::NetworkAuditDecision::Deny => "deny",
-                    },
-                )?;
-                dict.set_item("target", &event.target)?;
-                dict.set_item("port", event.port)?;
-                dict.set_item("method", event.method.as_deref())?;
-                dict.set_item("path", event.path.as_deref())?;
-                dict.set_item("status", event.status)?;
-                dict.set_item("reason", event.reason.as_deref())?;
+                let dict = audit_event_to_py_dict(py, &event)?;
                 list.append(dict)?;
             }
             Ok(list.into())

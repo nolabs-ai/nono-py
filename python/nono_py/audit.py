@@ -65,7 +65,6 @@ from typing import (
     Any,
     Literal,
     TypedDict,
-    Union,
 )
 
 _TAIL_READ_CHUNK = 65536
@@ -79,7 +78,7 @@ MERKLE_DOMAIN_ALPHA = b"nono.audit.merkle.alpha\n"
 HASH_ALGORITHM_ALPHA = "sha256"
 MERKLE_SCHEME_ALPHA = "alpha"
 
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 AUDIT_EVENTS_FILENAME = "audit-events.ndjson"
 
@@ -431,7 +430,7 @@ class _ApprovalDeniedPayload(TypedDict):
 
 
 # ApprovalDecision is a serde-tagged enum: "Granted" | {"Denied": ...} | "Timeout".
-ApprovalDecision = Union[Literal["Granted", "Timeout"], _ApprovalDeniedPayload]
+ApprovalDecision = Literal["Granted", "Timeout"] | _ApprovalDeniedPayload
 
 
 class AuditEntryPayload(TypedDict):
@@ -496,13 +495,9 @@ class NetworkEvent(TypedDict):
     event: NetworkAuditEventPayload
 
 
-AuditEvent = Union[
-    SessionStartedEvent,
-    SessionEndedEvent,
-    CapabilityDecisionEvent,
-    UrlOpenEvent,
-    NetworkEvent,
-]
+AuditEvent = (
+    SessionStartedEvent | SessionEndedEvent | CapabilityDecisionEvent | UrlOpenEvent | NetworkEvent
+)
 
 
 class AuditEventRecord(TypedDict):

@@ -111,6 +111,37 @@ print(caps.is_network_blocked)  # True
 Network is **allowed by default**. Call `block_network()` to restrict it.
 </Note>
 
+---
+
+### proxy_only
+
+```python
+proxy_only(proxy: ProxyHandle) -> None
+```
+
+Restrict network access to proxy-only mode. Blocks all outbound network except localhost TCP to the proxy's listening port. Use with `start_proxy()` to allow filtered network access through the proxy while blocking all direct connections.
+
+<ParamField path="proxy" type="ProxyHandle" required>
+  A running proxy handle from `start_proxy()`.
+</ParamField>
+
+```python
+from nono_py import CapabilitySet, ProxyConfig, start_proxy
+
+caps = CapabilitySet()
+proxy = start_proxy(ProxyConfig(allowed_hosts=["api.openai.com"]))
+caps.proxy_only(proxy)  # Only proxy traffic allowed
+
+# Pass proxy env vars to sandboxed child
+env = proxy.sandbox_env()
+```
+
+<Note>
+`proxy_only()` and `block_network()` are mutually exclusive — calling one overrides the other. Use `proxy_only()` when you want filtered network access; use `block_network()` when you want no network at all.
+</Note>
+
+---
+
 ### platform_rule
 
 ```python

@@ -5,7 +5,7 @@ This guide explains how to set up and develop nono-py, including working with a 
 ## Prerequisites
 
 - **Rust toolchain**: Install via [rustup](https://rustup.rs/)
-- **Python 3.9+**
+- **Python 3.10+**
 - **uv**: Install via [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 ## Project Structure
@@ -16,11 +16,16 @@ nono-py/
 ├── pyproject.toml          # Python package configuration
 ├── Makefile                # Build commands
 ├── src/
-│   └── lib.rs              # PyO3 bindings (Rust)
+│   ├── lib.rs              # PyO3 module entry + core bindings
+│   ├── proxy.rs            # Network proxy bindings
+│   ├── undo.rs             # Snapshot/undo bindings
+│   ├── policy.rs           # Policy resolution bindings
+│   └── sandboxed_exec.rs   # Sandboxed child execution
 ├── python/
 │   └── nono_py/
 │       ├── __init__.py     # Python package entry point
 │       ├── _nono_py.pyi    # Type stubs
+│       ├── audit.py        # Pure-Python audit log reader/writer/verifier
 │       └── py.typed        # PEP 561 marker
 └── tests/
     └── test_*.py           # Python tests
@@ -28,16 +33,25 @@ nono-py/
 
 ## Working with Local nono Crate
 
-The nono-py bindings depend on the `nono` Rust library. By default, `Cargo.toml` references the local nono workspace:
+The nono-py bindings depend on the `nono` and `nono-proxy` Rust libraries. By default, `Cargo.toml` pulls them from crates.io:
+
+```toml
+[dependencies]
+nono = "0.55.0"
+nono-proxy = "0.55.0"
+```
+
+For local development against an unreleased nono, override with a path dependency:
 
 ```toml
 [dependencies]
 nono = { path = "../nono/crates/nono" }
+nono-proxy = { path = "../nono/crates/nono-proxy" }
 ```
 
 ### Directory Layout
 
-For local development, arrange your directories like this:
+For local development with path dependencies, arrange your directories like this:
 
 ```
 ~/dev/
@@ -57,15 +71,14 @@ If your nono repository is in a different location, update `Cargo.toml`:
 ```toml
 # Relative path (recommended for local dev)
 nono = { path = "../nono/crates/nono" }
+nono-proxy = { path = "../nono/crates/nono-proxy" }
 
 # Or absolute path
 nono = { path = "/home/user/projects/nono/crates/nono" }
 
-# Or git reference (for CI/release)
-nono = { git = "https://github.com/always-further/nono", branch = "main" }
-
-# Or crates.io (when published)
-nono = "0.1"
+# Or crates.io (default — used in CI and releases)
+nono = "0.55.0"
+nono-proxy = "0.55.0"
 ```
 
 ## Setup
@@ -101,7 +114,7 @@ make dev
 
 ### Making Changes to nono-py
 
-1. Edit Rust code in `src/lib.rs`
+1. Edit Rust code in `src/` (`lib.rs`, `proxy.rs`, `undo.rs`, `policy.rs`, `sandboxed_exec.rs`)
 2. Edit Python code in `python/nono_py/`
 3. Rebuild: `uv run maturin develop`
 4. Run tests: `uv run pytest tests/ -v`
@@ -214,32 +227,18 @@ uv run mypy python/nono_py
 # Cargo.toml
 [dependencies]
 nono = { path = "../nono/crates/nono" }
+nono-proxy = { path = "../nono/crates/nono-proxy" }
 ```
 
-### For CI/GitHub Actions
+### For CI and Releases (default)
 
-The CI workflows checkout nono as a sibling directory:
-
-```yaml
-- name: Checkout nono library
-  uses: actions/checkout@v6.0.2
-  with:
-    repository: always-further/nono
-    path: nono
-```
-
-### For Release/Publishing
-
-Before publishing to PyPI, update to use git or crates.io:
+`Cargo.toml` uses crates.io versions. CI builds pull dependencies directly — no sibling checkout needed:
 
 ```toml
-# Cargo.toml - Option 1: Git reference
+# Cargo.toml
 [dependencies]
-nono = { git = "https://github.com/always-further/nono", tag = "v0.1.0" }
-
-# Cargo.toml - Option 2: crates.io (when nono is published)
-[dependencies]
-nono = "0.1"
+nono = "0.55.0"
+nono-proxy = "0.55.0"
 ```
 
 ## Troubleshooting
@@ -286,17 +285,16 @@ uv run mypy python/nono_py --ignore-missing-imports
 
 ## Release Process
 
-1. Update version in `Cargo.toml` and `pyproject.toml`
-2. Update `Cargo.toml` to use git tag or crates.io for nono dependency
-3. Commit changes
-4. Create and push tag: `git tag v0.1.0 && git push --tags`
-5. GitHub Actions will build wheels and publish to PyPI
+1. Update version in `Cargo.toml`, `pyproject.toml`, and `python/nono_py/__init__.py`
+2. Commit changes
+3. Create and push tag: `git tag v0.9.0 && git push --tags`
+4. GitHub Actions will build wheels and publish to PyPI
 
 ## Architecture Notes
 
 ### PyO3 Bindings
 
-The Rust code in `src/lib.rs` uses PyO3 to expose the nono API to Python:
+The Rust code in `src/` uses PyO3 to expose the nono API to Python:
 
 - `#[pyclass]` - Exposes a Rust struct as a Python class
 - `#[pymethods]` - Exposes methods on a Python class
@@ -314,7 +312,8 @@ nono_py/
 ├── __init__.py      # Re-exports from native module
 ├── _nono_py.pyi     # Type stubs for native module
 ├── _nono_py.so      # Compiled native module (generated)
+├── audit.py         # Pure-Python audit log reader/writer/verifier
 └── py.typed         # PEP 561 marker
 ```
 
-The native module is named `_nono_py` (with underscore) to indicate it's internal. The public API is exposed through `__init__.py`.
+The native module is named `_nono_py` (with underscore) to indicate it's internal. The public API is exposed through `__init__.py`. The `audit` submodule is pure Python and provides `AlphaRecorder`, `iter_session`, `tail_session`, `verify_log`, and typed event builders.

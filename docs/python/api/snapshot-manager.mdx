@@ -203,6 +203,15 @@ SessionMetadata(
 | `merkle_roots` | `list[ContentHash]` | Chain of Merkle roots from each snapshot (read-only, use `add_merkle_root()`) |
 | `network_events` | `list[dict]` | Network audit events (read-only, use `set_network_events()`) |
 
+**Read-only introspection properties:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `executable_identity` | `dict \| None` | `{"resolved_path": str, "sha256": str}` of the launched binary |
+| `audit_event_count` | `int` | Number of audit events recorded |
+| `audit_integrity` | `dict \| None` | `{"hash_algorithm", "event_count", "chain_head", "merkle_root"}` |
+| `audit_attestation` | `dict \| None` | `{"predicate_type", "key_id", "public_key", "bundle_filename"}` |
+
 | Method | Description |
 |--------|-------------|
 | `add_merkle_root(root)` | Append a Merkle root to the chain |

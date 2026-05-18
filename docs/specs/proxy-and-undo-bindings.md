@@ -10,10 +10,10 @@ filesystem rollback.
 
 ## Motivation
 
-`nono-py` currently exposes filesystem sandboxing, policy resolution, and
-sandboxed child execution. It does not surface the network proxy or the
-undo/snapshot system. A Python supervisor that spawns sandboxed agents needs
-all three to provide a complete security boundary:
+`nono-py` exposes filesystem sandboxing, policy resolution, sandboxed child
+execution, the network proxy, and the undo/snapshot system. A Python supervisor
+that spawns sandboxed agents uses all three to provide a complete security
+boundary:
 
 - **Filesystem** sandbox (already available via `CapabilitySet` / `apply()` /
   `sandboxed_exec()`)
@@ -23,14 +23,13 @@ all three to provide a complete security boundary:
 ## Dependency Changes
 
 Add `nono-proxy` as a dependency in `nono-py/Cargo.toml`. The core `nono`
-crate (already a dependency at `0.24.0`) contains the undo/snapshot system
-and the shared audit types. No changes are needed to either Rust crate.
+crate contains the undo/snapshot system and the shared audit types.
 
 ```toml
 [dependencies]
-nono = "0.24.0"
-nono-proxy = { version = "...", path = "..." }  # or crates.io version
-pyo3 = { version = "0.23", features = ["extension-module"] }
+nono = "0.55.0"
+nono-proxy = "0.55.0"
+pyo3 = { version = "0.25", features = ["extension-module"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 ```
 
@@ -66,6 +65,8 @@ config = ProxyConfig(
 | `routes` | `list[RouteConfig]` | `[]` | Reverse proxy credential routes |
 | `external_proxy` | `ExternalProxyConfig \| None` | `None` | Enterprise proxy passthrough |
 | `max_connections` | `int` | `256` | 0 = unlimited |
+| `intercept_ca_dir` | `str \| None` | `None` | Directory for TLS interception CA certificates |
+| `intercept_parent_ca_pems` | `bytes \| None` | `None` | Parent CA PEM bytes for TLS interception |
 
 #### RouteConfig
 
@@ -87,7 +88,7 @@ route = RouteConfig(
 | `credential_key` | `str \| None` | `None` | OS keyring account name |
 | `inject_mode` | `InjectMode` | `InjectMode.HEADER` | Credential injection method |
 | `inject_header` | `str` | `"Authorization"` | Header name (header mode) |
-| `credential_format` | `str` | `"Bearer {}"` | Format string with `{}` placeholder |
+| `credential_format` | `str \| None` | `None` | Format string with `{credential}` placeholder |
 | `path_pattern` | `str \| None` | `None` | URL path mode: match pattern |
 | `path_replacement` | `str \| None` | `None` | URL path mode: replacement pattern |
 | `query_param_name` | `str \| None` | `None` | Query param mode: param name |
@@ -161,7 +162,7 @@ proxy.shutdown()              # signal graceful shutdown
 | Key | Type | Notes |
 |---|---|---|
 | `timestamp_unix_ms` | `int` | |
-| `mode` | `str` | `"connect"`, `"reverse"`, `"external"` |
+| `mode` | `str` | `"connect"`, `"connect_intercept"`, `"reverse"`, `"external"` |
 | `decision` | `str` | `"allow"`, `"deny"` |
 | `target` | `str` | Hostname or service |
 | `port` | `int \| None` | |
@@ -169,6 +170,12 @@ proxy.shutdown()              # signal graceful shutdown
 | `path` | `str \| None` | Request path (reverse proxy) |
 | `status` | `int \| None` | Upstream response status |
 | `reason` | `str \| None` | Denial reason |
+| `route_id` | `str \| None` | Matched route prefix |
+| `auth_mechanism` | `str \| None` | `"proxy_authorization"`, `"phantom_header"`, `"phantom_path"`, `"phantom_query"` |
+| `auth_outcome` | `str \| None` | `"succeeded"` or `"failed"` |
+| `managed_credential_active` | `bool \| None` | Whether a managed credential was used |
+| `injection_mode` | `str \| None` | `"header"`, `"url_path"`, `"query_param"`, `"basic_auth"`, `"oauth2"` |
+| `denial_category` | `str \| None` | `"host_denied"`, `"endpoint_policy"`, `"authentication_failed"`, etc. |
 
 ### Module-Level Function
 
@@ -308,7 +315,7 @@ Wraps `nono::undo::FileState`. Frozen:
 ```python
 state.hash          # ContentHash
 state.size          # int
-state.mtime         # float (seconds since epoch)
+state.mtime         # int (seconds since epoch)
 state.permissions   # int (Unix mode bits)
 ```
 
@@ -348,13 +355,13 @@ Not yet implemented in `nono-py`:
 
 ```
 src/
-  lib.rs              # existing — add proxy + undo module declarations and registrations
-  policy.rs           # existing
-  sandboxed_exec.rs   # existing
-  proxy.rs            # new — ProxyConfig, RouteConfig, InjectMode, ExternalProxyConfig,
-                      #        ProxyHandle, start_proxy()
-  undo.rs             # new — SnapshotManager, ExclusionConfig, ContentHash, Change,
-                      #        SessionMetadata, SnapshotManifest, FileState
+  lib.rs              # Module entry point + core bindings (CapabilitySet, QueryContext, etc.)
+  policy.rs           # Policy resolution bindings
+  sandboxed_exec.rs   # Sandboxed child execution
+  proxy.rs            # ProxyConfig, RouteConfig, InjectMode, ExternalProxyConfig,
+                      #   ProxyHandle, start_proxy(), audit_event_to_py_dict()
+  undo.rs             # SnapshotManager, ExclusionConfig, ContentHash, Change,
+                      #   SessionMetadata, SnapshotManifest, FileState
 ```
 
 ## Type Stub Updates
