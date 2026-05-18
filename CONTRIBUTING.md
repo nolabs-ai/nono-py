@@ -98,7 +98,3 @@ Alternatively, a maintainer can squash your commits within GitHub.
 - All new functionality must have tests.
 - Run `uv run pytest tests/ -v` before submitting.
 - For Rust changes, run `cargo clippy -- -D warnings` to catch issues early.
-
-## Code of Conduct
-
-This project adheres to the [Contributor Covenant 3.0](https://www.contributor-covenant.org/version/3/0/code_of_conduct/) Code of Conduct. Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before contributing.
