@@ -1,7 +1,7 @@
 [package]
 name = "nono-py"
 version = "0.9.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.95"
 authors = ["Luke Hinds <luke@alwaysfurther.ai>"]
 license = "Apache-2.0"

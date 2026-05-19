@@ -131,7 +131,8 @@ class TestEventBuilders:
             duration_ms=5,
         )
         assert event["type"] == "capability_decision"
-        assert event["entry"]["request"]["path"] == "/tmp/foo"
+        path = event["entry"]["request"].get("path")
+        assert path == "/tmp/foo"
         assert event["entry"]["decision"] == "Granted"
         assert event["entry"]["duration_ms"] == 5
 
@@ -172,7 +173,9 @@ class TestEventBuilders:
             backend="b",
             duration_ms=0,
         )
-        assert len(event["entry"]["request"]["request_id"]) == 32
+        request_id = event["entry"]["request"].get("request_id")
+        assert request_id is not None
+        assert len(request_id) == 32
 
 
 class TestApprovalHelpers:

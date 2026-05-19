@@ -103,13 +103,13 @@ pub fn sandboxed_exec(
 
     // Validate timeout before passing to Duration::from_secs_f64,
     // which panics on negative or NaN values.
-    if let Some(t) = timeout_secs {
-        if t < 0.0 || t.is_nan() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "timeout_secs must be non-negative, got {}",
-                t
-            )));
-        }
+    if let Some(t) = timeout_secs
+        && (t < 0.0 || t.is_nan())
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "timeout_secs must be non-negative, got {}",
+            t
+        )));
     }
 
     // Verify threading before fork on Linux.
@@ -191,10 +191,10 @@ fn build_env_cstrings(overrides: Option<&[(String, String)]>) -> PyResult<Vec<CS
         .unwrap_or_default();
 
     for (key, value) in std::env::vars() {
-        if !override_keys.contains(key.as_str()) {
-            if let Ok(cstr) = CString::new(format!("{}={}", key, value)) {
-                env_c.push(cstr);
-            }
+        if !override_keys.contains(key.as_str())
+            && let Ok(cstr) = CString::new(format!("{}={}", key, value))
+        {
+            env_c.push(cstr);
         }
     }
 
@@ -421,14 +421,14 @@ fn wait_for_child(child_pid: i32, timeout_secs: Option<f64>) -> PyResult<i32> {
 
         if ret == 0 {
             // Child still running (WNOHANG returned 0)
-            if let Some(dl) = deadline {
-                if Instant::now() >= dl {
-                    unsafe {
-                        libc::kill(child_pid, libc::SIGKILL);
-                        libc::waitpid(child_pid, &mut status, 0);
-                    }
-                    return Ok(124);
+            if let Some(dl) = deadline
+                && Instant::now() >= dl
+            {
+                unsafe {
+                    libc::kill(child_pid, libc::SIGKILL);
+                    libc::waitpid(child_pid, &mut status, 0);
                 }
+                return Ok(124);
             }
             std::thread::sleep(Duration::from_millis(10));
             continue;

@@ -5,11 +5,11 @@
 //! background tokio runtime and is controlled synchronously from Python.
 
 use nono::undo::{NetworkAuditDecision, NetworkAuditMode};
+use nono_proxy::ProxyConfig as RustProxyConfig;
 use nono_proxy::config::{
     EndpointRule as RustEndpointRule, ExternalProxyConfig as RustExternalProxyConfig,
     InjectMode as RustInjectMode, RouteConfig as RustRouteConfig,
 };
-use nono_proxy::ProxyConfig as RustProxyConfig;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::net::IpAddr;

@@ -650,10 +650,10 @@ fn find_latest_manifest_on_disk(
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if let Some(stem) = name_str.strip_suffix(".json") {
-                if let Ok(num) = stem.parse::<u32>() {
-                    max_number = Some(max_number.map_or(num, |m: u32| m.max(num)));
-                }
+            if let Some(stem) = name_str.strip_suffix(".json")
+                && let Ok(num) = stem.parse::<u32>()
+            {
+                max_number = Some(max_number.map_or(num, |m: u32| m.max(num)));
             }
         }
     }

@@ -6,7 +6,10 @@ This file focuses on the type-level behaviour of ExclusionConfig and
 SessionMetadata which have no unit-level coverage elsewhere.
 """
 
+from __future__ import annotations
+
 import json
+from typing import TYPE_CHECKING
 
 import pytest  # ty:ignore[unresolved-import]  # noqa: F401
 
@@ -14,6 +17,9 @@ from nono_py import (
     ExclusionConfig,
     SessionMetadata,
 )
+
+if TYPE_CHECKING:
+    from nono_py._nono_py import NetworkAuditEvent
 
 
 class TestExclusionConfig:
@@ -94,7 +100,7 @@ class TestSessionMetadata:
 
     def test_set_network_events(self) -> None:
         meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
-        events = [
+        events: list[NetworkAuditEvent] = [
             {
                 "timestamp_unix_ms": 1700000000000,
                 "mode": "connect",
@@ -105,6 +111,12 @@ class TestSessionMetadata:
                 "path": None,
                 "status": None,
                 "reason": None,
+                "route_id": None,
+                "auth_mechanism": None,
+                "auth_outcome": None,
+                "managed_credential_active": None,
+                "injection_mode": None,
+                "denial_category": None,
             }
         ]
         meta.set_network_events(events)

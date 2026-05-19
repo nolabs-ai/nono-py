@@ -69,7 +69,7 @@ The nono library is pulled from crates.io (`nono = "0.55.0"`, `nono-proxy = "0.5
 ## Conventions
 
 - Python: ruff, line-length 100, target py310, strict mypy
-- Rust: edition 2021, rust-version 1.95, clippy with `-D warnings`
+- Rust: edition 2024, rust-version 1.95, clippy with `-D warnings`
 - Frozen PyO3 classes for immutable types (AccessMode, FsCapability, SupportInfo, CapabilitySource)
 - Path validation happens at add-time in Rust (fail fast)
 - Tests use `conftest.py` fixtures `temp_dir` and `temp_file` for filesystem isolation

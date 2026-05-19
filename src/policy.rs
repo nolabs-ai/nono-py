@@ -1,9 +1,9 @@
-use crate::{proxy::ProxyConfig, CapabilitySet};
+use crate::{CapabilitySet, proxy::ProxyConfig};
 use nono::{AccessMode, CapabilitySource, FsCapability, NonoError, Result as NonoResult};
+use nono_proxy::ProxyConfig as RustProxyConfig;
 use nono_proxy::config::{
     EndpointRule as RustEndpointRule, InjectMode as RustInjectMode, RouteConfig as RustRouteConfig,
 };
-use nono_proxy::ProxyConfig as RustProxyConfig;
 use pyo3::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -501,20 +501,20 @@ fn resolve_single_group(
         }
     }
 
-    if let Some(network) = &group.network {
-        if network.block {
-            caps.inner.set_network_blocked(true);
-        }
+    if let Some(network) = &group.network
+        && network.block
+    {
+        caps.inner.set_network_blocked(true);
     }
 
-    if cfg!(target_os = "macos") {
-        if let Some(pairs) = &group.symlink_pairs {
-            for symlink in pairs.keys() {
-                let expanded = expand_path(symlink)?;
-                let escaped = escape_seatbelt_path(path_to_utf8(&expanded)?)?;
-                caps.inner
-                    .add_platform_rule(format!("(allow file-read* (subpath \"{}\"))", escaped))?;
-            }
+    if cfg!(target_os = "macos")
+        && let Some(pairs) = &group.symlink_pairs
+    {
+        for symlink in pairs.keys() {
+            let expanded = expand_path(symlink)?;
+            let escaped = escape_seatbelt_path(path_to_utf8(&expanded)?)?;
+            caps.inner
+                .add_platform_rule(format!("(allow file-read* (subpath \"{}\"))", escaped))?;
         }
     }
 
@@ -565,10 +565,10 @@ fn add_deny_access_rules(
             });
         }
     };
-    if let Some(ref canonical) = canonical {
-        if *canonical != path {
-            deny_paths.push(canonical.clone());
-        }
+    if let Some(ref canonical) = canonical
+        && *canonical != path
+    {
+        deny_paths.push(canonical.clone());
     }
 
     let parent_resolved = if canonical.is_none() {
@@ -583,10 +583,10 @@ fn add_deny_access_rules(
     if cfg!(target_os = "macos") {
         emit_deny_rules(&path, caps)?;
 
-        if let Some(ref canonical) = canonical {
-            if *canonical != path {
-                emit_deny_rules(canonical, caps)?;
-            }
+        if let Some(ref canonical) = canonical
+            && *canonical != path
+        {
+            emit_deny_rules(canonical, caps)?;
         }
 
         if let Some(ref resolved) = parent_resolved {
