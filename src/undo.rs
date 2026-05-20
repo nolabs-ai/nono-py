@@ -21,7 +21,7 @@ use std::path::PathBuf;
 /// SHA-256 content hash for content-addressable storage.
 ///
 /// Immutable and hashable. Use `hex()` to get the 64-character hex string.
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct ContentHash {
     inner: RustContentHash,
@@ -64,7 +64,7 @@ impl ContentHash {
 // ---------------------------------------------------------------------------
 
 /// Filesystem state of a single file within a snapshot.
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct FileState {
     inner: RustFileState,
@@ -111,7 +111,7 @@ impl FileState {
 // ---------------------------------------------------------------------------
 
 /// A filesystem change detected between snapshots.
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct Change {
     inner: RustChange,
@@ -156,7 +156,7 @@ impl Change {
 // ---------------------------------------------------------------------------
 
 /// A snapshot manifest recording the state of all tracked files.
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct SnapshotManifest {
     inner: RustSnapshotManifest,
@@ -192,8 +192,8 @@ impl SnapshotManifest {
 
     /// Dict mapping file paths to their FileState.
     #[getter]
-    fn files(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn files(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
             for (path, state) in &self.inner.files {
                 dict.set_item(
@@ -204,7 +204,7 @@ impl SnapshotManifest {
                     .into_pyobject(py)?,
                 )?;
             }
-            Ok(dict.into())
+            Ok(dict.unbind().into_any())
         })
     }
 
@@ -222,7 +222,7 @@ impl SnapshotManifest {
 // ---------------------------------------------------------------------------
 
 /// Configuration for excluding files from snapshot tracking.
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct ExclusionConfig {
     inner: RustExclusionConfig,
@@ -288,7 +288,7 @@ impl ExclusionConfig {
 // ---------------------------------------------------------------------------
 
 /// Metadata for a sandboxed session including snapshots and audit trail.
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct SessionMetadata {
     inner: RustSessionMetadata,
@@ -391,15 +391,15 @@ impl SessionMetadata {
     /// Returns `{"resolved_path": str, "sha256": str}` or `None` if the
     /// session was not launched through a supervisor that captured it.
     #[getter]
-    fn executable_identity(&self) -> PyResult<Option<PyObject>> {
+    fn executable_identity(&self) -> PyResult<Option<Py<PyAny>>> {
         let Some(id) = self.inner.executable_identity.as_ref() else {
             return Ok(None);
         };
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("resolved_path", id.resolved_path.display().to_string())?;
             dict.set_item("sha256", id.sha256.to_string())?;
-            Ok(Some(dict.into()))
+            Ok(Some(dict.unbind().into_any()))
         })
     }
 
@@ -415,17 +415,17 @@ impl SessionMetadata {
     /// "chain_head": str, "merkle_root": str}` or `None` if integrity
     /// recording was disabled for this session.
     #[getter]
-    fn audit_integrity(&self) -> PyResult<Option<PyObject>> {
+    fn audit_integrity(&self) -> PyResult<Option<Py<PyAny>>> {
         let Some(s) = self.inner.audit_integrity.as_ref() else {
             return Ok(None);
         };
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("hash_algorithm", &s.hash_algorithm)?;
             dict.set_item("event_count", s.event_count)?;
             dict.set_item("chain_head", s.chain_head.to_string())?;
             dict.set_item("merkle_root", s.merkle_root.to_string())?;
-            Ok(Some(dict.into()))
+            Ok(Some(dict.unbind().into_any()))
         })
     }
 
@@ -434,17 +434,17 @@ impl SessionMetadata {
     /// Returns `{"predicate_type": str, "key_id": str, "public_key": str,
     /// "bundle_filename": str}` or `None` if the session was not signed.
     #[getter]
-    fn audit_attestation(&self) -> PyResult<Option<PyObject>> {
+    fn audit_attestation(&self) -> PyResult<Option<Py<PyAny>>> {
         let Some(s) = self.inner.audit_attestation.as_ref() else {
             return Ok(None);
         };
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("predicate_type", &s.predicate_type)?;
             dict.set_item("key_id", &s.key_id)?;
             dict.set_item("public_key", &s.public_key)?;
             dict.set_item("bundle_filename", &s.bundle_filename)?;
-            Ok(Some(dict.into()))
+            Ok(Some(dict.unbind().into_any()))
         })
     }
 
@@ -453,24 +453,24 @@ impl SessionMetadata {
     /// Returns a list of dicts with the same schema as
     /// `ProxyHandle.drain_audit_events()`.
     #[getter]
-    fn network_events(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn network_events(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let list = pyo3::types::PyList::empty(py);
             for event in &self.inner.network_events {
                 let dict = crate::proxy::audit_event_to_py_dict(py, event)?;
                 list.append(dict)?;
             }
-            Ok(list.into())
+            Ok(list.unbind().into_any())
         })
     }
 
     /// Set network events from a list of dicts (as returned by
     /// `ProxyHandle.drain_audit_events()`).
-    fn set_network_events(&mut self, events: Vec<PyObject>) -> PyResult<()> {
-        Python::with_gil(|py| {
+    fn set_network_events(&mut self, events: Vec<Py<PyAny>>) -> PyResult<()> {
+        Python::attach(|py| {
             let mut rust_events = Vec::with_capacity(events.len());
             for obj in &events {
-                let dict = obj.downcast_bound::<pyo3::types::PyDict>(py)?;
+                let dict = obj.bind(py).cast::<pyo3::types::PyDict>()?;
                 rust_events.push(nono::undo::NetworkAuditEvent {
                     timestamp_unix_ms: dict
                         .get_item("timestamp_unix_ms")?
@@ -509,12 +509,22 @@ impl SessionMetadata {
                         .get_item("target")?
                         .ok_or_else(|| PyValueError::new_err("missing target"))?
                         .extract()?,
-                    port: dict.get_item("port")?.and_then(|v| v.extract().ok()),
-                    method: dict.get_item("method")?.and_then(|v| v.extract().ok()),
-                    path: dict.get_item("path")?.and_then(|v| v.extract().ok()),
-                    status: dict.get_item("status")?.and_then(|v| v.extract().ok()),
-                    reason: dict.get_item("reason")?.and_then(|v| v.extract().ok()),
-                    route_id: dict.get_item("route_id")?.and_then(|v| v.extract().ok()),
+                    port: dict.get_item("port")?.and_then(|v| v.extract::<u16>().ok()),
+                    method: dict
+                        .get_item("method")?
+                        .and_then(|v| v.extract::<String>().ok()),
+                    path: dict
+                        .get_item("path")?
+                        .and_then(|v| v.extract::<String>().ok()),
+                    status: dict
+                        .get_item("status")?
+                        .and_then(|v| v.extract::<u16>().ok()),
+                    reason: dict
+                        .get_item("reason")?
+                        .and_then(|v| v.extract::<String>().ok()),
+                    route_id: dict
+                        .get_item("route_id")?
+                        .and_then(|v| v.extract::<String>().ok()),
                     auth_mechanism: dict
                         .get_item("auth_mechanism")?
                         .and_then(|v| v.extract::<String>().ok())
@@ -551,7 +561,7 @@ impl SessionMetadata {
                         .transpose()?,
                     managed_credential_active: dict
                         .get_item("managed_credential_active")?
-                        .and_then(|v| v.extract().ok()),
+                        .and_then(|v| v.extract::<bool>().ok()),
                     injection_mode: dict
                         .get_item("injection_mode")?
                         .and_then(|v| v.extract::<String>().ok())

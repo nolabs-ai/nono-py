@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 [dependencies]
 nono = "0.55.0"
 nono-proxy = "0.55.0"
-pyo3 = { version = "0.25", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
