@@ -24,10 +24,10 @@ class TestQueryContextPathQueries:
     def test_query_allowed_path(self) -> None:
         """Test querying an allowed path."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         ctx = QueryContext(caps)
 
-        result = ctx.query_path("/tmp/somefile", AccessMode.READ)
+        result = ctx.query_path("/tmp/somefile", AccessMode.READ)  # noqa: S108
         assert result["status"] == "allowed"
         assert result["reason"] == "granted_path"
         assert "granted_path" in result
@@ -35,7 +35,7 @@ class TestQueryContextPathQueries:
     def test_query_denied_path(self) -> None:
         """Test querying a denied path."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         ctx = QueryContext(caps)
 
         result = ctx.query_path("/var/log/test", AccessMode.READ)
@@ -45,10 +45,10 @@ class TestQueryContextPathQueries:
     def test_query_insufficient_access(self) -> None:
         """Test querying with insufficient access level."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         ctx = QueryContext(caps)
 
-        result = ctx.query_path("/tmp/somefile", AccessMode.WRITE)
+        result = ctx.query_path("/tmp/somefile", AccessMode.WRITE)  # noqa: S108
         assert result["status"] == "denied"
         assert result["reason"] == "insufficient_access"
         assert "granted" in result
@@ -57,19 +57,19 @@ class TestQueryContextPathQueries:
     def test_query_read_write_covers_read(self) -> None:
         """Test that READ_WRITE access covers READ requests."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ_WRITE)
+        caps.allow_path("/tmp", AccessMode.READ_WRITE)  # noqa: S108
         ctx = QueryContext(caps)
 
-        result = ctx.query_path("/tmp/file", AccessMode.READ)
+        result = ctx.query_path("/tmp/file", AccessMode.READ)  # noqa: S108
         assert result["status"] == "allowed"
 
     def test_query_read_write_covers_write(self) -> None:
         """Test that READ_WRITE access covers WRITE requests."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ_WRITE)
+        caps.allow_path("/tmp", AccessMode.READ_WRITE)  # noqa: S108
         ctx = QueryContext(caps)
 
-        result = ctx.query_path("/tmp/file", AccessMode.WRITE)
+        result = ctx.query_path("/tmp/file", AccessMode.WRITE)  # noqa: S108
         assert result["status"] == "allowed"
 
     def test_query_file_capability(self) -> None:
@@ -124,7 +124,7 @@ class TestQueryContextIsolation:
     def test_context_reflects_caps_at_creation_time(self) -> None:
         """Test that context reflects caps as they were when created."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         ctx = QueryContext(caps)
 
         # Modify caps after creating context

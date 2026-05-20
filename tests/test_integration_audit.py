@@ -65,7 +65,7 @@ class TestIterSession:
                 fh,
                 capability_decision(
                     timestamp="2024-01-01T00:00:00.001Z",
-                    path="/tmp/file.txt",
+                    path="/tmp/file.txt",  # noqa: S108
                     access="Read",
                     child_pid=1234,
                     session_id="test-session",
@@ -97,7 +97,7 @@ class TestIterSession:
                 fh,
                 capability_decision(
                     timestamp="2024-01-01T00:00:00.001Z",
-                    path="/tmp/f.txt",
+                    path="/tmp/f.txt",  # noqa: S108
                     access="Read",
                     child_pid=42,
                     session_id="s1",

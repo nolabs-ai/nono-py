@@ -130,7 +130,7 @@ def test_session_metadata_smoke() -> None:
     meta = SessionMetadata(
         session_id="smoke-session-id",
         command=["echo", "smoke"],
-        tracked_paths=["/tmp"],
+        tracked_paths=["/tmp"],  # noqa: S108
     )
     json_str = meta.to_json()
     parsed = json.loads(json_str)

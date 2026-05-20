@@ -122,7 +122,7 @@ class TestEventBuilders:
     def test_capability_decision_granted(self) -> None:
         event = capability_decision(
             timestamp="2026-01-01T00:00:00Z",
-            path="/tmp/foo",
+            path="/tmp/foo",  # noqa: S108
             access="Read",
             child_pid=1234,
             session_id="abc",
@@ -132,7 +132,7 @@ class TestEventBuilders:
         )
         assert event["type"] == "capability_decision"
         path = event["entry"]["request"].get("path")
-        assert path == "/tmp/foo"
+        assert path == "/tmp/foo"  # noqa: S108
         assert event["entry"]["decision"] == "Granted"
         assert event["entry"]["duration_ms"] == 5
 
@@ -152,7 +152,7 @@ class TestEventBuilders:
     def test_capability_decision_timeout(self) -> None:
         event = capability_decision(
             timestamp="2026-01-01T00:00:00Z",
-            path="/tmp",
+            path="/tmp",  # noqa: S108
             access="Read",
             child_pid=1,
             session_id="s",
@@ -165,7 +165,7 @@ class TestEventBuilders:
     def test_capability_decision_default_request_id(self) -> None:
         event = capability_decision(
             timestamp="t",
-            path="/tmp",
+            path="/tmp",  # noqa: S108
             access="Read",
             child_pid=1,
             session_id="s",

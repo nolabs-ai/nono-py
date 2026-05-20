@@ -70,10 +70,14 @@ select = [
     "UP",     # pyupgrade
     "ARG",    # flake8-unused-arguments
     "SIM",    # flake8-simplify
+    "S",      # flake8-bandit (security)
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # pytest uses assert statements
 
 [tool.ruff.lint.isort]
 known-first-party = ["nono_py"]

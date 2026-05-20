@@ -1,0 +1,127 @@
+name: Auto-release on version bump
+
+# Flow: detect version from Cargo.toml/pyproject.toml → publish to PyPI first →
+# only tag and create GitHub release on publish success. Each step is idempotent,
+# so workflow_dispatch retries recover cleanly from partial failures (e.g.,
+# transient PyPI/OIDC errors leaving PyPI published but GH release uncreated).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - Cargo.toml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect version state
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      needs_publish: ${{ steps.detect.outputs.needs_publish }}
+      needs_tag: ${{ steps.detect.outputs.needs_tag }}
+      needs_release: ${{ steps.detect.outputs.needs_release }}
+      any_work: ${{ steps.detect.outputs.any_work }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect version and outstanding work
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PY_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ "$PY_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::version mismatch: pyproject.toml=$PY_VERSION Cargo.toml=$CARGO_VERSION"
+            exit 1
+          fi
+
+          NEEDS_PUBLISH=true
+          if curl -fsSL -o /dev/null "https://pypi.org/pypi/nono-py/${PY_VERSION}/json"; then
+            NEEDS_PUBLISH=false
+          fi
+
+          NEEDS_TAG=true
+          if git rev-parse -q --verify "refs/tags/v${PY_VERSION}" >/dev/null; then
+            NEEDS_TAG=false
+          fi
+
+          NEEDS_RELEASE=true
+          if gh release view "v${PY_VERSION}" >/dev/null 2>&1; then
+            NEEDS_RELEASE=false
+          fi
+
+          ANY_WORK=false
+          if [ "$NEEDS_PUBLISH" = true ] || [ "$NEEDS_TAG" = true ] || [ "$NEEDS_RELEASE" = true ]; then
+            ANY_WORK=true
+          fi
+
+          echo "version=${PY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "needs_publish=${NEEDS_PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "needs_tag=${NEEDS_TAG}" >> "$GITHUB_OUTPUT"
+          echo "needs_release=${NEEDS_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "any_work=${ANY_WORK}" >> "$GITHUB_OUTPUT"
+
+          echo "version=${PY_VERSION} needs_publish=${NEEDS_PUBLISH} needs_tag=${NEEDS_TAG} needs_release=${NEEDS_RELEASE}"
+
+  publish:
+    name: Publish to PyPI
+    needs: detect
+    if: needs.detect.outputs.needs_publish == 'true'
+    uses: ./.github/workflows/publish.yml
+    secrets: inherit
+    permissions:
+      id-token: write
+      contents: read
+
+  tag-and-release:
+    name: Tag and GitHub release
+    needs: [detect, publish]
+    if: |
+      always() &&
+      needs.detect.outputs.any_work == 'true' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        if: needs.detect.outputs.needs_tag == 'true'
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Create GitHub release
+        if: needs.detect.outputs.needs_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          if echo "${VERSION}" | grep -qE '(alpha|beta|rc)'; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "v${VERSION}" \
+            --title "Release v${VERSION}" \
+            --generate-notes \
+            ${PRERELEASE_FLAG}

@@ -48,7 +48,7 @@ class TestSandboxStateSerialization:
     def test_to_json_with_paths(self) -> None:
         """Test serializing state with paths."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         state = SandboxState.from_caps(caps)
         json_str = state.to_json()
 
@@ -59,7 +59,7 @@ class TestSandboxStateSerialization:
     def test_from_json_valid(self) -> None:
         """Test deserializing valid JSON."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         caps.block_network()
         original_state = SandboxState.from_caps(caps)
         json_str = original_state.to_json()
@@ -96,7 +96,7 @@ class TestSandboxStateRoundTrip:
     def test_roundtrip_with_paths(self) -> None:
         """Test round-trip with paths (paths must still exist)."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ_WRITE)
+        caps.allow_path("/tmp", AccessMode.READ_WRITE)  # noqa: S108
         caps.block_network()
 
         state = SandboxState.from_caps(caps)

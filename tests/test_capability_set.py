@@ -31,7 +31,7 @@ class TestCapabilitySetPaths:
     def test_allow_path_valid_directory(self) -> None:
         """Test allowing access to a valid directory."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
 
         fs_caps = caps.fs_capabilities()
         assert len(fs_caps) == 1
@@ -70,7 +70,7 @@ class TestCapabilitySetPaths:
         """Test that allow_file on a directory raises ValueError."""
         caps = CapabilitySet()
         with pytest.raises(ValueError):
-            caps.allow_file("/tmp", AccessMode.READ)
+            caps.allow_file("/tmp", AccessMode.READ)  # noqa: S108
 
     def test_allow_path_on_file_raises(self) -> None:
         """Test that allow_path on a file raises ValueError."""
@@ -104,7 +104,7 @@ class TestCapabilitySetPaths:
     def test_multiple_paths(self) -> None:
         """Test adding multiple paths."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         caps.allow_path("/var", AccessMode.WRITE)
 
         assert len(caps.fs_capabilities()) == 2
@@ -137,8 +137,8 @@ class TestCapabilitySetDeduplicate:
     def test_deduplicate_removes_duplicates(self) -> None:
         """Test that deduplicate removes duplicate paths."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
-        caps.allow_path("/tmp", AccessMode.WRITE)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
+        caps.allow_path("/tmp", AccessMode.WRITE)  # noqa: S108
 
         assert len(caps.fs_capabilities()) == 2
 
@@ -160,9 +160,9 @@ class TestCapabilitySetSummary:
     def test_summary_with_paths(self) -> None:
         """Test summary includes path info."""
         caps = CapabilitySet()
-        caps.allow_path("/tmp", AccessMode.READ)
+        caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
         summary = caps.summary()
-        assert "tmp" in summary.lower() or "/tmp" in summary
+        assert "tmp" in summary.lower() or "/tmp" in summary  # noqa: S108
 
 
 class TestCapabilitySetPlatformRule:

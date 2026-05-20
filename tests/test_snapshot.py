@@ -68,12 +68,12 @@ class TestSessionMetadata:
         assert meta.ended is None
 
     def test_started_auto_populated(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         assert meta.started is not None
         assert len(meta.started) > 0
 
     def test_setters(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         meta.ended = "2026-01-01T00:01:00Z"
         assert meta.ended == "2026-01-01T00:01:00Z"
 
@@ -84,22 +84,22 @@ class TestSessionMetadata:
         assert meta.exit_code == 42
 
     def test_exit_code_nullable(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         meta.exit_code = 1
         assert meta.exit_code == 1
         meta.exit_code = None
         assert meta.exit_code is None
 
     def test_merkle_roots_empty(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         assert meta.merkle_roots == []
 
     def test_network_events_empty(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         assert meta.network_events == []
 
     def test_set_network_events(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         events: list[NetworkAuditEvent] = [
             {
                 "timestamp_unix_ms": 1700000000000,
@@ -149,23 +149,23 @@ class TestSessionMetadata:
             SessionMetadata.from_json("not valid json")
 
     def test_executable_identity_none_by_default(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         assert meta.executable_identity is None
 
     def test_audit_event_count(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         assert meta.audit_event_count == 0
 
     def test_audit_integrity_none_by_default(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         assert meta.audit_integrity is None
 
     def test_audit_attestation_none_by_default(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         assert meta.audit_attestation is None
 
     def test_repr(self) -> None:
-        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])
+        meta = SessionMetadata(session_id="s", command=["echo"], tracked_paths=["/tmp"])  # noqa: S108
         r = repr(meta)
         assert "SessionMetadata" in r
         assert "s" in r
