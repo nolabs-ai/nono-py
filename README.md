@@ -95,6 +95,11 @@ result = sandboxed_exec(caps, ["python", "agent.py"], cwd="/workspace", timeout_
 print(result.stdout, result.exit_code)
 ```
 
+`sandboxed_exec` does not inherit the parent process environment by default.
+Pass only the variables the child needs through `env=[("NAME", "value")]`.
+Full parent environment inheritance requires `inherit_env=True`; dynamic-loader
+variables such as `LD_*` and `DYLD_*` are rejected.
+
 ### Network Proxy
 
 Domain-filtered network access for sandboxed children. The proxy intercepts
@@ -114,8 +119,8 @@ config = ProxyConfig(
 )
 proxy = start_proxy(config)
 
-# Inject proxy env vars into sandboxed child
-env = proxy.sandbox_env()
+# Inject only the current proxy/session env vars into the sandboxed child
+env = proxy.sandbox_env(extra_env=[("NONO_SESSION_ID", "session-001")])
 result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
 
 # Audit trail

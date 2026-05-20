@@ -329,6 +329,7 @@ def sandboxed_exec(
     cwd: str | None = None,
     timeout_secs: float | None = None,
     env: list[tuple[str, str]] | None = None,
+    inherit_env: bool = False,
 ) -> ExecResult:
     """Execute a command in a sandboxed child process.
 
@@ -337,7 +338,10 @@ def sandboxed_exec(
         command: List of command + arguments
         cwd: Working directory for the child
         timeout_secs: Maximum execution time in seconds (None = no limit)
-        env: Optional environment variable overrides
+        env: Optional child environment variables. The parent environment is
+            not inherited unless inherit_env=True.
+        inherit_env: If True, inherit the parent environment and apply env as
+            overrides. Dynamic-loader environment variables are rejected.
 
     Returns:
         ExecResult with stdout, stderr, and exit_code
@@ -546,8 +550,10 @@ class ProxyHandle:
         """Environment variables for reverse proxy credential routes."""
         ...
 
-    def sandbox_env(self) -> list[tuple[str, str]]:
-        """All env vars for a sandboxed child (env_vars + credential_env_vars combined)."""
+    def sandbox_env(
+        self, extra_env: list[tuple[str, str]] | None = None
+    ) -> list[tuple[str, str]]:
+        """All env vars for a sandboxed child, plus optional per-child vars."""
         ...
 
     def drain_audit_events(self) -> list[NetworkAuditEvent]:
