@@ -13,8 +13,8 @@ name = "_nono_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-nono = "0.55.0"
-nono-proxy = "0.55.0"
+nono = "0.57.0"
+nono-proxy = "0.57.0"
 pyo3 = { version = "0.28", features = ["extension-module"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 libc = "0.2"
