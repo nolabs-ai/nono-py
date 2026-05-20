@@ -84,4 +84,5 @@ dev = [
     "pytest>=8",
     "mypy>=1.10",
     "ruff>=0.4",
+    "bandit>=1.9.4",
 ]

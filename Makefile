@@ -1,6 +1,6 @@
 .PHONY: build build-release dev install test lint lint-rust lint-python lint-pyright \
         fmt fmt-rust fmt-python fmt-check fmt-check-rust fmt-check-python \
-        typecheck clean help release ci
+        typecheck security clean help release ci
 
 # Pin cargo-driven steps to the venv interpreter so `make` works regardless
 # of which Python is on the system PATH.
@@ -106,6 +106,12 @@ fmt-check-python:
 
 # Check all formatting
 fmt-check: fmt-check-rust fmt-check-python
+
+# Security
+security:
+	uv run bandit -r python/nono_py
+	uv audit
+	cargo audit
 
 # Remove build artifacts
 clean:
