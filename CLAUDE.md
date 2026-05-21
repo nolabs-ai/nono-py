@@ -30,6 +30,7 @@ cargo clippy -- -D warnings                  # Lint Rust
 uv run ruff format python/ tests/            # Format Python
 uv run ruff check --fix python/ tests/       # Lint Python (autofix)
 uv run mypy python/nono_py                   # Type check (strict mode)
+uvx ty check python/                        # Type check (ty)
 ```
 
 `make ci` runs the full suite: fmt-check, lint, test.
@@ -44,7 +45,7 @@ uv run mypy python/nono_py                   # Type check (strict mode)
 
 `python/nono_py/__init__.py` re-exports everything from the native `_nono_py` module. The underscore-prefixed native module is an internal implementation detail.
 
-`python/nono_py/_nono_py.pyi` contains type stubs that must stay in sync with the Rust API. This file is the source of truth for IDE autocompletion and mypy.
+`python/nono_py/_nono_py.pyi` contains type stubs that must stay in sync with the Rust API. This file is the source of truth for IDE autocompletion, mypy, and ty.
 
 ### Key Classes
 

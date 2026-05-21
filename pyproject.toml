@@ -34,7 +34,7 @@ Changelog = "https://github.com/always-further/nono-py/releases"
 dev = [
     "pytest>=8",
     "mypy>=1.10",
-    "pyright>=1.1",
+    "ty>=0.0.36",
     "ruff>=0.4",
     "maturin>=1.13.2",
 ]
@@ -54,6 +54,9 @@ markers = [
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+[tool.ty.environment]
+python-version = "3.10"
 
 [tool.ruff]
 target-version = "py310"

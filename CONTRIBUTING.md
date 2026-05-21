@@ -89,7 +89,7 @@ Alternatively, a maintainer can squash your commits within GitHub.
 
 ## Code Style
 
-- **Python**: ruff for formatting and linting, mypy for type checking (strict mode). Target Python 3.10+, line length 100.
+- **Python**: ruff for formatting and linting, mypy for type checking (strict mode), ty as a secondary type checker. Target Python 3.10+, line length 100.
 - **Rust**: `cargo fmt` for formatting, `cargo clippy -- -D warnings` for linting. Edition 2021.
 - **Type stubs**: `python/nono_py/_nono_py.pyi` must stay in sync with the Rust API. If you change a `#[pyclass]` or `#[pymethods]` block, update the corresponding stub.
 

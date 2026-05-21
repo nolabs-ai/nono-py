@@ -1,4 +1,4 @@
-.PHONY: build build-release dev install test lint lint-rust lint-python lint-pyright \
+.PHONY: build build-release dev install test lint lint-rust lint-python lint-ty \
         fmt fmt-rust fmt-python fmt-check fmt-check-rust fmt-check-python \
         typecheck security clean help release ci
 
@@ -24,11 +24,11 @@ help:
 	@echo "  test-quick   Run tests without rebuilding"
 	@echo ""
 	@echo "Quality targets:"
-	@echo "  lint         Run all linters (clippy + ruff + mypy + pyright)"
+	@echo "  lint         Run all linters (clippy + ruff + mypy + ty)"
 	@echo "  lint-rust    cargo clippy -D warnings"
 	@echo "  lint-python  ruff check + mypy"
-	@echo "  lint-pyright pyright (Python type check, strict)"
-	@echo "  typecheck    Run mypy and pyright together"
+	@echo "  lint-ty      ty (Python type check)"
+	@echo "  typecheck    Run mypy and ty together"
 	@echo "  fmt          Format code (rustfmt + ruff)"
 	@echo "  fmt-check    Check formatting (rustfmt + ruff, no changes)"
 	@echo ""
@@ -71,17 +71,17 @@ lint-python:
 	uv run ruff check python/ tests/
 	uv run mypy python/nono_py
 
-# Run pyright over the project (uses pyrightconfig if present, else defaults)
-lint-pyright:
-	uv run pyright
+# Run ty over the project
+lint-ty:
+	uvx ty check python/
 
-# Run mypy + pyright together
+# Run mypy + ty together
 typecheck:
 	uv run mypy python/nono_py
-	uv run pyright
+	uvx ty check python/
 
 # Run all linters
-lint: lint-rust lint-python lint-pyright
+lint: lint-rust lint-python lint-ty
 
 # Format Rust code
 fmt-rust:
@@ -109,7 +109,7 @@ fmt-check: fmt-check-rust fmt-check-python
 
 # Security
 security:
-	uv audit --preview-features audit
+	uv export --no-hashes --frozen --no-editable | uvx pip-audit -r /dev/stdin
 	cargo audit
 
 # Remove build artifacts
