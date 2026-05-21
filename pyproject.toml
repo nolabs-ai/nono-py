@@ -34,7 +34,6 @@ Changelog = "https://github.com/always-further/nono-py/releases"
 dev = [
     "pytest>=8",
     "mypy>=1.10",
-    "ty>=0.0.36",
     "ruff>=0.4",
     "maturin>=1.13.2",
 ]
@@ -91,4 +90,5 @@ dev = [
     "pytest>=8",
     "mypy>=1.10",
     "ruff>=0.4",
+    "ty>=0.0.36",
 ]

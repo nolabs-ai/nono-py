@@ -73,12 +73,12 @@ lint-python:
 
 # Run ty over the project
 lint-ty:
-	uvx ty check python/
+	uv run ty check python/
 
 # Run mypy + ty together
 typecheck:
 	uv run mypy python/nono_py
-	uvx ty check python/
+	uv run ty check python/
 
 # Run all linters
 lint: lint-rust lint-python lint-ty
@@ -109,7 +109,7 @@ fmt-check: fmt-check-rust fmt-check-python
 
 # Security
 security:
-	uv export --no-hashes --frozen --no-editable | uvx pip-audit -r /dev/stdin
+	uv audit --preview-features audit
 	cargo audit
 
 # Remove build artifacts

@@ -217,7 +217,7 @@ uv run ruff check --fix python/ tests/
 
 # Type checking
 uv run mypy python/nono_py
-uvx ty check python/
+uv run ty check python/
 ```
 
 ## Switching Between Local and Published nono

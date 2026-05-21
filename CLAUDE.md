@@ -30,7 +30,7 @@ cargo clippy -- -D warnings                  # Lint Rust
 uv run ruff format python/ tests/            # Format Python
 uv run ruff check --fix python/ tests/       # Lint Python (autofix)
 uv run mypy python/nono_py                   # Type check (strict mode)
-uvx ty check python/                        # Type check (ty)
+uv run ty check python/                     # Type check (ty)
 ```
 
 `make ci` runs the full suite: fmt-check, lint, test.
