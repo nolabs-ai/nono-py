@@ -47,7 +47,7 @@ def main() -> None:
     ctx = QueryContext(caps)
     proxy_config = policy.resolve_proxy_config(["proxy_web_demo"])
     print("Permission checks:")
-    print("  /tmp/example.txt read:", ctx.query_path("/tmp/example.txt", AccessMode.READ))
+    print("  /tmp/example.txt read:", ctx.query_path("/tmp/example.txt", AccessMode.READ))  # noqa: S108
     print(
         "  ~/.ssh/config read:",
         ctx.query_path(str(Path.home() / ".ssh" / "config"), AccessMode.READ),

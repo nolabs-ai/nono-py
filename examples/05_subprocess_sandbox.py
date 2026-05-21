@@ -111,11 +111,12 @@ def main() -> None:
         env = os.environ.copy()
         env["NONO_STATE"] = json_str
 
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603
             [sys.executable, worker_path],
             env=env,
             capture_output=True,
             text=True,
+            shell=False
         )
 
         print(result.stdout)

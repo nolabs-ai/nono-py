@@ -41,7 +41,7 @@ def demo_path_errors() -> None:
 
     # ValueError: Using allow_file on a directory
     try:
-        caps.allow_file("/tmp", AccessMode.READ)
+        caps.allow_file("/tmp", AccessMode.READ)  # noqa: S108
     except ValueError as e:
         print(f"ValueError (directory as file): {e}")
 
@@ -183,7 +183,7 @@ if __name__ == "__main__":
     print()
     safe_sandbox_setup(
         [
-            ("/tmp", AccessMode.READ_WRITE),
+            ("/tmp", AccessMode.READ_WRITE),  # noqa: S108
             ("/usr", AccessMode.READ),
             ("/nonexistent", AccessMode.READ),  # Will be skipped
         ]

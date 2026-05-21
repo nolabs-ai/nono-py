@@ -15,7 +15,7 @@ def main() -> None:
     caps = CapabilitySet()
 
     # Add some directory permissions
-    caps.allow_path("/tmp", AccessMode.READ)
+    caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
     caps.allow_path("/var/log", AccessMode.READ_WRITE)
 
     # Add a file permission
@@ -56,8 +56,8 @@ def main() -> None:
     import os
 
     test_paths = [
-        os.path.realpath("/tmp"),  # Resolves symlinks
-        os.path.join(os.path.realpath("/tmp"), "subdir/file.txt"),
+        os.path.realpath("/tmp"),  # Resolves symlinks  # noqa: S108
+        os.path.join(os.path.realpath("/tmp"), "subdir/file.txt"),  # noqa: S108
         os.path.join(os.path.realpath("/var/log"), "app.log"),
         os.path.realpath("/var/cache") if os.path.exists("/var/cache") else "/var/cache",
         "/etc/passwd",
@@ -99,9 +99,9 @@ def demo_deduplication() -> None:
     caps = CapabilitySet()
 
     # Add overlapping permissions for the same path
-    caps.allow_path("/tmp", AccessMode.READ)
-    caps.allow_path("/tmp", AccessMode.WRITE)
-    caps.allow_path("/tmp", AccessMode.READ)
+    caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
+    caps.allow_path("/tmp", AccessMode.WRITE)  # noqa: S108
+    caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
 
     print(f"Before deduplication: {len(caps.fs_capabilities())} capabilities")
     for cap in caps.fs_capabilities():

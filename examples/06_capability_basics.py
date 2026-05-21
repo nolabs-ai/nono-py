@@ -11,7 +11,7 @@ def main() -> None:
     caps = CapabilitySet()
 
     # Filesystem restrictions
-    caps.allow_path("/tmp", AccessMode.READ_WRITE)
+    caps.allow_path("/tmp", AccessMode.READ_WRITE)  # noqa: S108
     caps.allow_path("/usr", AccessMode.READ)
     caps.block_network()
 
@@ -28,7 +28,7 @@ def demo_build_environment() -> None:
     caps = CapabilitySet()
 
     # Filesystem access
-    caps.allow_path("/tmp", AccessMode.READ_WRITE)
+    caps.allow_path("/tmp", AccessMode.READ_WRITE)  # noqa: S108
     caps.allow_path("/usr", AccessMode.READ)
     # /lib exists on Linux but not macOS
     import os

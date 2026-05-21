@@ -54,7 +54,7 @@ def build_caps(policy_path: Path, project_dir: Path) -> CapabilitySet:
 def main() -> None:
     example_dir = Path(__file__).parent
     policy_path = example_dir / "policy_example.json"
-    project_dir = Path("/tmp")
+    project_dir = Path("/tmp")  # noqa: S108
     allowed_file = project_dir / "nono-policy-demo.txt"
 
     allowed_file.write_text("hello from policy demo\n")

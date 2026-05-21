@@ -14,7 +14,7 @@ from nono_py import AccessMode, CapabilitySet, QueryContext
 def main() -> None:
     # Create a capability set with specific permissions
     caps = CapabilitySet()
-    caps.allow_path("/tmp", AccessMode.READ)
+    caps.allow_path("/tmp", AccessMode.READ)  # noqa: S108
     caps.allow_path("/var/log", AccessMode.READ_WRITE)
     caps.block_network()
 
@@ -26,8 +26,8 @@ def main() -> None:
     print("-" * 50)
 
     queries = [
-        ("/tmp/data.txt", AccessMode.READ),
-        ("/tmp/data.txt", AccessMode.WRITE),
+        ("/tmp/data.txt", AccessMode.READ),  # noqa: S108
+        ("/tmp/data.txt", AccessMode.WRITE),  # noqa: S108
         ("/var/log/app.log", AccessMode.READ),
         ("/var/log/app.log", AccessMode.WRITE),
         ("/etc/passwd", AccessMode.READ),

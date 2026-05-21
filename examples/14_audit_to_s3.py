@@ -96,7 +96,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from proxy_demo_support import PROXY_DEMO_CHILD_CODE, build_proxy_child_caps
 
@@ -377,10 +377,10 @@ def _optional_int(name: str, default: int) -> int:
 
 
 def _build_real_s3_client(
-    endpoint_url: Optional[str], region: Optional[str]
+    endpoint_url: str | None, region: str | None
 ) -> Any:
     try:
-        import boto3  # pyright: ignore[reportMissingImports]
+        import boto3  # type: ignore[import-unresolved]
     except ImportError:
         print(
             "error: boto3 is not installed. Run 'uv pip install boto3' "
@@ -482,7 +482,7 @@ def main() -> None:
 
     # Decide where the supervisor log lives. Either the user pointed us at
     # one (real CLI session), or we synthesise one for the demo.
-    synth_dir: Optional[tempfile.TemporaryDirectory] = None
+    synth_dir: tempfile.TemporaryDirectory | None = None
     if not session_dir:
         synth_dir = tempfile.TemporaryDirectory(prefix="nono-synth-session-")
         session_dir = Path(synth_dir.name)

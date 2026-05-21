@@ -15,7 +15,7 @@ from nono_py import AccessMode, CapabilitySet, SandboxState
 def main() -> None:
     # Create a capability set
     caps = CapabilitySet()
-    caps.allow_path("/tmp", AccessMode.READ_WRITE)
+    caps.allow_path("/tmp", AccessMode.READ_WRITE)  # noqa: S108
     caps.allow_path("/usr", AccessMode.READ)
     caps.block_network()
 
