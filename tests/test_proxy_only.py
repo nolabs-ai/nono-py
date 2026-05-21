@@ -63,6 +63,26 @@ class TestProxyOnlyCapabilitySet:
         assert "blocked" in repr(caps)
         assert "proxy-only" not in repr(caps)
 
+    def test_sandbox_env_merges_per_child_env(self, proxy) -> None:
+        """sandbox_env merges current proxy vars with explicit session vars."""
+        proxy_vars = proxy.env_vars()
+        env = dict(
+            proxy.sandbox_env(
+                extra_env=[
+                    ("NONO_SESSION_ID", "session-123"),
+                    ("HTTP_PROXY", "http://127.0.0.1:1"),
+                ]
+            )
+        )
+
+        assert env["NONO_SESSION_ID"] == "session-123"
+        assert env["HTTP_PROXY"] == proxy_vars["HTTP_PROXY"]
+
+    def test_sandbox_env_rejects_loader_env(self, proxy) -> None:
+        """sandbox_env should not package loader-control env vars."""
+        with pytest.raises(ValueError, match="LD_PRELOAD"):
+            proxy.sandbox_env(extra_env=[("LD_PRELOAD", "blocked-loader.so")])
+
 
 class TestProxyOnlySandboxedExec:
     """Integration tests for proxy_only with sandboxed_exec."""

@@ -7,8 +7,9 @@
 
 use crate::CapabilitySet;
 use nono::Sandbox;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::io::{Read, Result as IoResult};
 use std::os::fd::FromRawFd;
@@ -75,8 +76,10 @@ struct PipeFds {
 ///     cwd: Working directory for the child (defaults to current directory)
 ///     timeout_secs: Maximum execution time in seconds (None = no limit)
 ///     env: Optional list of (key, value) tuples for environment variables.
-///         When provided, the child inherits the current environment with
-///         these variables added or overridden.
+///         These variables become the child's environment. The parent
+///         environment is not inherited unless inherit_env=True.
+///     inherit_env: If True, start from the parent environment and apply env
+///         as overrides. Dangerous dynamic loader variables are rejected.
 ///
 /// Returns:
 ///     ExecResult with stdout, stderr, and exit_code
@@ -86,7 +89,7 @@ struct PipeFds {
 ///         command cannot be executed
 ///     ValueError: If the command list is empty or timeout is negative
 #[pyfunction]
-#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None))]
+#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None, inherit_env=false))]
 pub fn sandboxed_exec(
     py: Python<'_>,
     caps: &CapabilitySet,
@@ -94,6 +97,7 @@ pub fn sandboxed_exec(
     cwd: Option<String>,
     timeout_secs: Option<f64>,
     env: Option<Vec<(String, String)>>,
+    inherit_env: bool,
 ) -> PyResult<ExecResult> {
     if command.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -127,7 +131,7 @@ pub fn sandboxed_exec(
     }
 
     // Prepare all data before fork (allocation-safe zone)
-    let ctx = prepare_fork_context(&caps.inner, &command, cwd, timeout_secs, env)?;
+    let ctx = prepare_fork_context(&caps.inner, &command, cwd, timeout_secs, env, inherit_env)?;
 
     // Create pipes for stdout and stderr
     let stdout_pipe = create_pipe()?;
@@ -144,6 +148,7 @@ fn prepare_fork_context(
     cwd: Option<String>,
     timeout_secs: Option<f64>,
     env: Option<Vec<(String, String)>>,
+    inherit_env: bool,
 ) -> PyResult<ForkContext> {
     let resolved_program = resolve_program(&command[0])?;
     let program_c = CString::new(resolved_program.as_os_str().as_bytes())
@@ -157,7 +162,7 @@ fn prepare_fork_context(
         );
     }
 
-    let env_c = build_env_cstrings(env.as_deref())?;
+    let env_c = build_env_cstrings(env.as_deref(), inherit_env)?;
 
     let cwd_c = match &cwd {
         Some(d) => {
@@ -182,31 +187,115 @@ fn prepare_fork_context(
     })
 }
 
-/// Build environment CStrings from current env + overrides.
-fn build_env_cstrings(overrides: Option<&[(String, String)]>) -> PyResult<Vec<CString>> {
-    let mut env_c: Vec<CString> = Vec::new();
+/// Build child environment CStrings.
+///
+/// By default, the child receives only env vars explicitly supplied by the
+/// caller. Parent environment inheritance is an explicit opt-in because env
+/// vars can carry API keys, proxy tokens, and dynamic-loader control state.
+fn build_env_cstrings(
+    overrides: Option<&[(String, String)]>,
+    inherit_env: bool,
+) -> PyResult<Vec<CString>> {
+    let mut env = BTreeMap::new();
 
-    let override_keys: std::collections::HashSet<&str> = overrides
-        .map(|ovr| ovr.iter().map(|(k, _)| k.as_str()).collect())
-        .unwrap_or_default();
-
-    for (key, value) in std::env::vars() {
-        if !override_keys.contains(key.as_str())
-            && let Ok(cstr) = CString::new(format!("{}={}", key, value))
-        {
-            env_c.push(cstr);
+    if inherit_env {
+        for (key, value) in std::env::vars_os() {
+            insert_env_var(
+                &mut env,
+                key.as_os_str().as_bytes().to_vec(),
+                value.as_os_str().as_bytes().to_vec(),
+            )?;
         }
     }
 
     if let Some(ovr) = overrides {
         for (key, value) in ovr {
-            if let Ok(cstr) = CString::new(format!("{}={}", key, value)) {
-                env_c.push(cstr);
-            }
+            insert_env_var(&mut env, key.as_bytes().to_vec(), value.as_bytes().to_vec())?;
         }
     }
 
+    let mut env_c: Vec<CString> = Vec::new();
+    for (mut key, value) in env {
+        key.reserve(1 + value.len());
+        key.push(b'=');
+        key.extend_from_slice(&value);
+
+        env_c.push(
+            CString::new(key)
+                .map_err(|_| PyValueError::new_err("environment contains null byte"))?,
+        );
+    }
+
     Ok(env_c)
+}
+
+pub(crate) fn sanitize_env_pairs(pairs: Vec<(String, String)>) -> PyResult<Vec<(String, String)>> {
+    let mut env = BTreeMap::new();
+    for (key, value) in pairs {
+        insert_env_var(&mut env, key.as_bytes().to_vec(), value.as_bytes().to_vec())?;
+    }
+
+    let mut sanitized = Vec::with_capacity(env.len());
+    for (key, value) in env {
+        let key = String::from_utf8(key)
+            .map_err(|_| PyValueError::new_err("environment name is not valid UTF-8"))?;
+        let value = String::from_utf8(value)
+            .map_err(|_| PyValueError::new_err("environment value is not valid UTF-8"))?;
+        sanitized.push((key, value));
+    }
+    Ok(sanitized)
+}
+
+fn insert_env_var(
+    env: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+    key: Vec<u8>,
+    value: Vec<u8>,
+) -> PyResult<()> {
+    validate_env_var(&key, &value)?;
+    env.insert(key, value);
+    Ok(())
+}
+
+fn validate_env_var(key: &[u8], value: &[u8]) -> PyResult<()> {
+    if key.is_empty() {
+        return Err(PyValueError::new_err(
+            "environment variable name must not be empty",
+        ));
+    }
+    if key.contains(&b'=') {
+        return Err(PyValueError::new_err(format!(
+            "environment variable name '{}' must not contain '='",
+            display_env_key(key)
+        )));
+    }
+    if key.contains(&0) {
+        return Err(PyValueError::new_err(
+            "environment variable name contains null byte",
+        ));
+    }
+    if value.contains(&0) {
+        return Err(PyValueError::new_err(format!(
+            "environment variable value for '{}' contains null byte",
+            display_env_key(key)
+        )));
+    }
+    if is_dangerous_loader_env(key) {
+        return Err(PyValueError::new_err(format!(
+            "environment variable '{}' is not allowed in sandboxed_exec",
+            display_env_key(key)
+        )));
+    }
+    Ok(())
+}
+
+fn is_dangerous_loader_env(key: &[u8]) -> bool {
+    key.starts_with(b"LD_")
+        || key.starts_with(b"DYLD_")
+        || matches!(key, b"LIBPATH" | b"SHLIB_PATH")
+}
+
+fn display_env_key(key: &[u8]) -> String {
+    String::from_utf8_lossy(key).into_owned()
 }
 
 /// Create a pipe, returning a PipeFds struct.

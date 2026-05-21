@@ -517,12 +517,19 @@ impl ProxyHandle {
     ///
     /// Combines ``env_vars()`` (HTTP_PROXY, HTTPS_PROXY, etc.) with
     /// ``credential_env_vars()`` (route-specific base URLs and tokens)
-    /// into a single list of (key, value) tuples suitable for passing
-    /// directly to ``sandboxed_exec(env=...)``.
-    fn sandbox_env(&self) -> Vec<(String, String)> {
-        let mut vars = self.handle.env_vars();
+    /// and optional per-child session variables into a single list of
+    /// (key, value) tuples suitable for passing directly to
+    /// ``sandboxed_exec(env=...)``. The parent process environment is never
+    /// copied.
+    #[pyo3(signature = (extra_env=None))]
+    fn sandbox_env(
+        &self,
+        extra_env: Option<Vec<(String, String)>>,
+    ) -> PyResult<Vec<(String, String)>> {
+        let mut vars = extra_env.unwrap_or_default();
+        vars.extend(self.handle.env_vars());
         vars.extend(self.handle.credential_env_vars(&self.config));
-        vars
+        crate::sandboxed_exec::sanitize_env_pairs(vars)
     }
 
     /// Drain and return collected network audit events.
