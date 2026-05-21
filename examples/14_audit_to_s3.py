@@ -380,7 +380,7 @@ def _build_real_s3_client(
     endpoint_url: str | None, region: str | None
 ) -> Any:
     try:
-        import boto3  # pyright: ignore[reportMissingImports]  # ty:ignore[unresolved-import]
+        import boto3  # type: ignore[import-unresolved]
     except ImportError:
         print(
             "error: boto3 is not installed. Run 'uv pip install boto3' "
