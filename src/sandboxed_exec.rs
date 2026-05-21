@@ -215,14 +215,13 @@ fn build_env_cstrings(
     }
 
     let mut env_c: Vec<CString> = Vec::new();
-    for (key, value) in env {
-        let mut entry = Vec::with_capacity(key.len() + 1 + value.len());
-        entry.extend_from_slice(&key);
-        entry.push(b'=');
-        entry.extend_from_slice(&value);
+    for (mut key, value) in env {
+        key.reserve(1 + value.len());
+        key.push(b'=');
+        key.extend_from_slice(&value);
 
         env_c.push(
-            CString::new(entry)
+            CString::new(key)
                 .map_err(|_| PyValueError::new_err("environment contains null byte"))?,
         );
     }
