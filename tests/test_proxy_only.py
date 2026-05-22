@@ -1,5 +1,6 @@
 """Tests for proxy_only network mode on CapabilitySet."""
 
+import socket
 import sys
 
 import pytest
@@ -142,6 +143,51 @@ class TestProxyOnlySandboxedExec:
         stderr = result.stderr.decode(errors="replace")
         assert b"BLOCKED" in result.stdout, f"stderr={stderr!r}"
         assert b"BYPASSED" not in result.stdout
+
+    def test_child_cannot_bypass_proxy_to_local_listener_after_env_removal(
+        self, proxy, temp_dir
+    ) -> None:
+        """Proxy-only still blocks direct TCP if the child removes proxy env vars."""
+        caps = self._make_caps(temp_dir, proxy)
+        env = proxy.sandbox_env()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            direct_port = listener.getsockname()[1]
+
+            result = sandboxed_exec(
+                caps,
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, socket\n"
+                    "for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'):\n"
+                    "    os.environ.pop(key, None)\n"
+                    "def probe(label, port):\n"
+                    "    s = socket.socket()\n"
+                    "    s.settimeout(3)\n"
+                    "    try:\n"
+                    "        s.connect(('127.0.0.1', port))\n"
+                    "        print(f'{label}:CONNECTED')\n"
+                    "    except (PermissionError, OSError) as e:\n"
+                    "        print(f'{label}:BLOCKED:{type(e).__name__}')\n"
+                    "    finally:\n"
+                    "        s.close()\n"
+                    f"probe('PROXY', {proxy.port})\n"
+                    f"probe('DIRECT', {direct_port})\n",
+                ],
+                cwd=str(temp_dir),
+                env=env,
+                timeout_secs=10.0,
+            )
+
+        stderr = result.stderr.decode(errors="replace")
+        assert result.exit_code == 0, f"exit={result.exit_code} stderr={stderr!r}"
+        assert b"PROXY:CONNECTED" in result.stdout, f"stderr={stderr!r}"
+        assert b"DIRECT:BLOCKED" in result.stdout, f"stderr={stderr!r}"
+        assert b"DIRECT:CONNECTED" not in result.stdout
 
     def test_proxy_filters_blocked_domain(self, proxy, temp_dir) -> None:
         """Proxy denies connections to domains not in the allowlist."""

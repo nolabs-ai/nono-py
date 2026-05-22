@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::io::{Read, Result as IoResult};
 use std::os::fd::FromRawFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -59,6 +61,20 @@ struct ForkContext {
 struct PipeFds {
     read_fd: i32,
     write_fd: i32,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct ProxyOnlyPolicy {
+    proxy_port: u16,
+    bind_ports: Vec<u16>,
+}
+
+#[cfg(target_os = "linux")]
+struct ProxySupervisor {
+    sock: Option<nono::SupervisorSocket>,
+    notify_fd: Option<OwnedFd>,
+    policy: ProxyOnlyPolicy,
 }
 
 /// Execute a command in a sandboxed child process.
@@ -133,12 +149,24 @@ pub fn sandboxed_exec(
     // Prepare all data before fork (allocation-safe zone)
     let ctx = prepare_fork_context(&caps.inner, &command, cwd, timeout_secs, env, inherit_env)?;
 
+    #[cfg(target_os = "linux")]
+    let proxy_supervisor_pair = create_proxy_supervisor_pair(&ctx)?;
+
     // Create pipes for stdout and stderr
     let stdout_pipe = create_pipe()?;
     let stderr_pipe = create_pipe()?;
 
     // Release the GIL during fork+wait so other Python threads can proceed
-    py.detach(|| do_fork_sandbox_exec(&ctx, &stdout_pipe, &stderr_pipe))
+    py.detach(|| {
+        #[cfg(target_os = "linux")]
+        {
+            do_fork_sandbox_exec(&ctx, &stdout_pipe, &stderr_pipe, proxy_supervisor_pair)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            do_fork_sandbox_exec(&ctx, &stdout_pipe, &stderr_pipe)
+        }
+    })
 }
 
 /// Prepare all data needed for fork+exec while allocation is safe.
@@ -185,6 +213,19 @@ fn prepare_fork_context(
         cwd_c,
         timeout_secs,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn create_proxy_supervisor_pair(
+    ctx: &ForkContext,
+) -> PyResult<Option<(nono::SupervisorSocket, nono::SupervisorSocket)>> {
+    if proxy_only_policy(&ctx.caps).is_none() {
+        return Ok(None);
+    }
+
+    nono::SupervisorSocket::pair()
+        .map(Some)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create proxy supervisor: {}", e)))
 }
 
 /// Build child environment CStrings.
@@ -369,6 +410,10 @@ fn do_fork_sandbox_exec(
     ctx: &ForkContext,
     stdout_pipe: &PipeFds,
     stderr_pipe: &PipeFds,
+    #[cfg(target_os = "linux")] proxy_supervisor_pair: Option<(
+        nono::SupervisorSocket,
+        nono::SupervisorSocket,
+    )>,
 ) -> PyResult<ExecResult> {
     let argv_ptrs: Vec<*const libc::c_char> = ctx
         .argv_c
@@ -404,11 +449,28 @@ fn do_fork_sandbox_exec(
 
     if pid == 0 {
         // === CHILD PROCESS ===
-        child_process(ctx, &argv_ptrs, &envp_ptrs, stdout_pipe, stderr_pipe);
+        child_process(
+            ctx,
+            &argv_ptrs,
+            &envp_ptrs,
+            stdout_pipe,
+            stderr_pipe,
+            #[cfg(target_os = "linux")]
+            proxy_supervisor_pair.as_ref(),
+        );
     }
 
     // === PARENT PROCESS ===
-    parent_process(pid, stdout_pipe, stderr_pipe, ctx.timeout_secs)
+    parent_process(
+        pid,
+        stdout_pipe,
+        stderr_pipe,
+        ctx.timeout_secs,
+        #[cfg(target_os = "linux")]
+        proxy_supervisor_pair,
+        #[cfg(target_os = "linux")]
+        proxy_only_policy(&ctx.caps),
+    )
 }
 
 /// Child process: set up pipes, apply sandbox, chdir, exec.
@@ -419,7 +481,21 @@ fn child_process(
     envp_ptrs: &[*const libc::c_char],
     stdout_pipe: &PipeFds,
     stderr_pipe: &PipeFds,
+    #[cfg(target_os = "linux")] proxy_supervisor_pair: Option<&(
+        nono::SupervisorSocket,
+        nono::SupervisorSocket,
+    )>,
 ) -> ! {
+    #[cfg(target_os = "linux")]
+    let proxy_child_fd = proxy_supervisor_pair.map(|(_, child_sock)| child_sock.as_raw_fd());
+
+    #[cfg(target_os = "linux")]
+    if let Some((supervisor_sock, _)) = proxy_supervisor_pair {
+        unsafe {
+            libc::close(supervisor_sock.as_raw_fd());
+        }
+    }
+
     // Close read ends (parent reads, child writes)
     unsafe {
         libc::close(stdout_pipe.read_fd);
@@ -434,7 +510,12 @@ fn child_process(
         libc::close(stderr_pipe.write_fd);
     }
 
-    if let Err(e) = close_untrusted_fds() {
+    #[cfg(target_os = "linux")]
+    let keep_fds: Vec<i32> = proxy_child_fd.into_iter().collect();
+    #[cfg(not(target_os = "linux"))]
+    let keep_fds: Vec<i32> = Vec::new();
+
+    if let Err(e) = close_untrusted_fds(&keep_fds) {
         let detail = format!("nono: failed to close inherited file descriptors: {}\n", e);
         let msg = detail.as_bytes();
         unsafe {
@@ -462,17 +543,60 @@ fn child_process(
         }
     }
 
-    // Apply sandbox restrictions
-    if let Err(e) = Sandbox::apply(&ctx.caps) {
-        let detail = format!("nono: sandbox apply failed: {}\n", e);
-        let msg = detail.as_bytes();
+    #[cfg(target_os = "linux")]
+    {
+        match Sandbox::apply(&ctx.caps) {
+            Ok(fallback) => {
+                if let Err(e) =
+                    install_proxy_fallback_if_needed(&ctx.caps, fallback, proxy_child_fd)
+                {
+                    let detail = format!("nono: proxy-only supervisor setup failed: {}\n", e);
+                    let msg = detail.as_bytes();
+                    unsafe {
+                        libc::write(
+                            libc::STDERR_FILENO,
+                            msg.as_ptr().cast::<libc::c_void>(),
+                            msg.len(),
+                        );
+                        libc::_exit(126);
+                    }
+                }
+            }
+            Err(e) => {
+                let detail = format!("nono: sandbox apply failed: {}\n", e);
+                let msg = detail.as_bytes();
+                unsafe {
+                    libc::write(
+                        libc::STDERR_FILENO,
+                        msg.as_ptr().cast::<libc::c_void>(),
+                        msg.len(),
+                    );
+                    libc::_exit(126);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Err(e) = Sandbox::apply(&ctx.caps) {
+            let detail = format!("nono: sandbox apply failed: {}\n", e);
+            let msg = detail.as_bytes();
+            unsafe {
+                libc::write(
+                    libc::STDERR_FILENO,
+                    msg.as_ptr().cast::<libc::c_void>(),
+                    msg.len(),
+                );
+                libc::_exit(126);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = proxy_child_fd {
         unsafe {
-            libc::write(
-                libc::STDERR_FILENO,
-                msg.as_ptr().cast::<libc::c_void>(),
-                msg.len(),
-            );
-            libc::_exit(126);
+            libc::close(fd);
         }
     }
 
@@ -496,20 +620,45 @@ fn child_process(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn install_proxy_fallback_if_needed(
+    caps: &nono::CapabilitySet,
+    fallback: nono::sandbox::SeccompNetFallback,
+    proxy_child_fd: Option<i32>,
+) -> Result<(), String> {
+    let nono::sandbox::SeccompNetFallback::ProxyOnly { .. } = fallback else {
+        return Ok(());
+    };
+
+    let Some(sock_fd) = proxy_child_fd else {
+        return Err("missing proxy supervisor socket".to_string());
+    };
+
+    let has_bind_ports = match caps.network_mode() {
+        nono::NetworkMode::ProxyOnly { bind_ports, .. } => !bind_ports.is_empty(),
+        _ => false,
+    };
+
+    let notify_fd =
+        nono::sandbox::install_seccomp_proxy_filter(has_bind_ports).map_err(|e| e.to_string())?;
+    nono::supervisor::socket::send_fd_via_socket(sock_fd, notify_fd.as_raw_fd())
+        .map_err(|e| e.to_string())
+}
+
 /// Close every inherited fd except stdin/stdout/stderr in the forked child.
 ///
 /// Open descriptors are capabilities: a sandbox cannot revoke access that was
 /// already represented by an fd before `Sandbox::apply()`. This must run after
 /// stdout/stderr are wired to the capture pipes and before applying the sandbox.
-fn close_untrusted_fds() -> IoResult<()> {
+fn close_untrusted_fds(keep_fds: &[i32]) -> IoResult<()> {
     #[cfg(target_os = "linux")]
     {
-        if close_range_from(3).is_ok() {
+        if keep_fds.is_empty() && close_range_from(3).is_ok() {
             return Ok(());
         }
     }
 
-    close_fds_by_rlimit(3);
+    close_fds_by_rlimit(3, keep_fds);
     Ok(())
 }
 
@@ -525,9 +674,12 @@ fn close_range_from(first_fd: u32) -> IoResult<()> {
     }
 }
 
-fn close_fds_by_rlimit(first_fd: i32) {
+fn close_fds_by_rlimit(first_fd: i32, keep_fds: &[i32]) {
     let max_fd = open_fd_limit();
     for fd in first_fd..max_fd {
+        if keep_fds.contains(&fd) {
+            continue;
+        }
         // SAFETY: closing an invalid fd is harmless; EBADF is ignored.
         unsafe {
             libc::close(fd);
@@ -562,12 +714,20 @@ fn parent_process(
     stdout_pipe: &PipeFds,
     stderr_pipe: &PipeFds,
     timeout_secs: Option<f64>,
+    #[cfg(target_os = "linux")] proxy_supervisor_pair: Option<(
+        nono::SupervisorSocket,
+        nono::SupervisorSocket,
+    )>,
+    #[cfg(target_os = "linux")] proxy_policy: Option<ProxyOnlyPolicy>,
 ) -> PyResult<ExecResult> {
     // Close write ends (child writes, parent reads)
     unsafe {
         libc::close(stdout_pipe.write_fd);
         libc::close(stderr_pipe.write_fd);
     }
+
+    #[cfg(target_os = "linux")]
+    let mut proxy_supervisor = create_proxy_supervisor(proxy_supervisor_pair, proxy_policy);
 
     // Capture read fds before spawning threads (moved into closures)
     let stdout_read = stdout_pipe.read_fd;
@@ -591,7 +751,12 @@ fn parent_process(
         buf
     });
 
-    let exit_code = wait_for_child(child_pid, timeout_secs)?;
+    let exit_code = wait_for_child(
+        child_pid,
+        timeout_secs,
+        #[cfg(target_os = "linux")]
+        proxy_supervisor.as_mut(),
+    )?;
 
     let stdout_buf = stdout_handle.join().unwrap_or_default();
     let stderr_buf = stderr_handle.join().unwrap_or_default();
@@ -603,12 +768,33 @@ fn parent_process(
     })
 }
 
+#[cfg(target_os = "linux")]
+fn create_proxy_supervisor(
+    proxy_supervisor_pair: Option<(nono::SupervisorSocket, nono::SupervisorSocket)>,
+    proxy_policy: Option<ProxyOnlyPolicy>,
+) -> Option<ProxySupervisor> {
+    let (supervisor_sock, child_sock) = proxy_supervisor_pair?;
+    drop(child_sock);
+    Some(ProxySupervisor {
+        sock: Some(supervisor_sock),
+        notify_fd: None,
+        policy: proxy_policy?,
+    })
+}
+
 /// Wait for child process, with optional timeout.
 /// Returns the exit code, or -signal_number if killed by signal.
-fn wait_for_child(child_pid: i32, timeout_secs: Option<f64>) -> PyResult<i32> {
+fn wait_for_child(
+    child_pid: i32,
+    timeout_secs: Option<f64>,
+    #[cfg(target_os = "linux")] mut proxy_supervisor: Option<&mut ProxySupervisor>,
+) -> PyResult<i32> {
     let deadline = timeout_secs.map(|t| Instant::now() + Duration::from_secs_f64(t));
 
     loop {
+        #[cfg(target_os = "linux")]
+        service_proxy_supervisor(proxy_supervisor.as_deref_mut())?;
+
         let mut status: i32 = 0;
         // SAFETY: waitpid is safe with a valid pid.
         let ret = unsafe {
@@ -639,6 +825,8 @@ fn wait_for_child(child_pid: i32, timeout_secs: Option<f64>) -> PyResult<i32> {
                     libc::kill(child_pid, libc::SIGKILL);
                     libc::waitpid(child_pid, &mut status, 0);
                 }
+                #[cfg(target_os = "linux")]
+                service_proxy_supervisor(proxy_supervisor.as_deref_mut())?;
                 return Ok(124);
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -660,6 +848,135 @@ fn wait_for_child(child_pid: i32, timeout_secs: Option<f64>) -> PyResult<i32> {
         return Err(PyRuntimeError::new_err(
             "Child process exited with unexpected status",
         ));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn service_proxy_supervisor(proxy_supervisor: Option<&mut ProxySupervisor>) -> PyResult<()> {
+    let Some(supervisor) = proxy_supervisor else {
+        return Ok(());
+    };
+
+    if supervisor.notify_fd.is_none() {
+        try_receive_proxy_notify_fd(supervisor)?;
+    }
+
+    let Some(fd) = supervisor.notify_fd.as_ref() else {
+        return Ok(());
+    };
+
+    loop {
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll is safe with a valid pointer to one pollfd.
+        let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(PyRuntimeError::new_err(format!(
+                "proxy supervisor poll() failed: {}",
+                err
+            )));
+        }
+        if ret == 0 || pfd.revents & libc::POLLIN == 0 {
+            return Ok(());
+        }
+
+        handle_proxy_notification(fd.as_raw_fd(), &supervisor.policy)?;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()> {
+    let Some(sock) = supervisor.sock.as_ref() else {
+        return Ok(());
+    };
+
+    let mut pfd = libc::pollfd {
+        fd: sock.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll is safe with a valid pointer to one pollfd.
+    let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(());
+        }
+        return Err(PyRuntimeError::new_err(format!(
+            "proxy supervisor socket poll() failed: {}",
+            err
+        )));
+    }
+    if ret == 0 {
+        return Ok(());
+    }
+
+    if pfd.revents & libc::POLLIN != 0 {
+        supervisor.notify_fd = sock.recv_fd().ok();
+        supervisor.sock = None;
+        return Ok(());
+    }
+
+    if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        supervisor.sock = None;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_proxy_notification(notify_fd: i32, policy: &ProxyOnlyPolicy) -> PyResult<()> {
+    use nono::sandbox::{
+        SYS_BIND, SYS_CONNECT, continue_notif, deny_notif, notif_id_valid, read_notif_sockaddr,
+        recv_notif, respond_notif_errno,
+    };
+
+    let notif = recv_notif(notify_fd).map_err(proxy_supervisor_err)?;
+    let sockaddr = match read_notif_sockaddr(notif.pid, notif.data.args[1], notif.data.args[2]) {
+        Ok(info) => info,
+        Err(_) => {
+            let _ = deny_notif(notify_fd, notif.id);
+            return Ok(());
+        }
+    };
+
+    if !notif_id_valid(notify_fd, notif.id).map_err(proxy_supervisor_err)? {
+        return Ok(());
+    }
+
+    let allow = match notif.data.nr {
+        SYS_CONNECT => sockaddr.is_loopback && sockaddr.port == policy.proxy_port,
+        SYS_BIND => policy.bind_ports.contains(&sockaddr.port),
+        _ => false,
+    };
+
+    if allow {
+        continue_notif(notify_fd, notif.id).map_err(proxy_supervisor_err)
+    } else {
+        respond_notif_errno(notify_fd, notif.id, libc::EACCES).map_err(proxy_supervisor_err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proxy_supervisor_err(e: nono::NonoError) -> PyErr {
+    PyRuntimeError::new_err(format!("proxy supervisor failed: {}", e))
+}
+
+#[cfg(target_os = "linux")]
+fn proxy_only_policy(caps: &nono::CapabilitySet) -> Option<ProxyOnlyPolicy> {
+    match caps.network_mode() {
+        nono::NetworkMode::ProxyOnly { port, bind_ports } => Some(ProxyOnlyPolicy {
+            proxy_port: *port,
+            bind_ports: bind_ports.clone(),
+        }),
+        _ => None,
     }
 }
 
