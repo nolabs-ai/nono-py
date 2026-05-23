@@ -14,6 +14,9 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::net::IpAddr;
 use std::sync::Mutex;
+use url::Url;
+
+const DENY_ALL_CONNECT_HOST: &str = "__nono_py_deny_all_connect.invalid";
 
 pub(crate) fn audit_event_to_py_dict<'py>(
     py: Python<'py>,
@@ -363,11 +366,19 @@ impl ExternalProxyConfig {
 #[derive(Clone)]
 pub struct ProxyConfig {
     pub(crate) inner: RustProxyConfig,
+    allowed_hosts: Vec<String>,
+    allow_all_hosts: bool,
 }
 
 impl ProxyConfig {
-    pub(crate) fn from_inner(inner: RustProxyConfig) -> Self {
-        Self { inner }
+    pub(crate) fn from_inner(mut inner: RustProxyConfig) -> Self {
+        let allowed_hosts = inner.allowed_hosts.clone();
+        inner.allowed_hosts = effective_filter_hosts(&allowed_hosts, &inner.routes, false);
+        Self {
+            inner,
+            allowed_hosts,
+            allow_all_hosts: false,
+        }
     }
 }
 
@@ -375,7 +386,7 @@ impl ProxyConfig {
 impl ProxyConfig {
     #[new]
     #[pyo3(signature = (
-        allowed_hosts = vec![],
+        allowed_hosts = None,
         routes = vec![],
         external_proxy = None,
         bind_addr = String::from("127.0.0.1"),
@@ -383,10 +394,11 @@ impl ProxyConfig {
         max_connections = 256,
         intercept_ca_dir = None,
         intercept_parent_ca_pems = None,
+        allow_all_hosts = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        allowed_hosts: Vec<String>,
+        allowed_hosts: Option<Vec<String>>,
         routes: Vec<RouteConfig>,
         external_proxy: Option<ExternalProxyConfig>,
         bind_addr: String,
@@ -394,23 +406,34 @@ impl ProxyConfig {
         max_connections: usize,
         intercept_ca_dir: Option<String>,
         intercept_parent_ca_pems: Option<Vec<u8>>,
+        allow_all_hosts: bool,
     ) -> PyResult<Self> {
         let addr: IpAddr = bind_addr
             .parse()
             .map_err(|e| PyValueError::new_err(format!("Invalid bind address: {}", e)))?;
+        let allowed_hosts = allowed_hosts.unwrap_or_default();
+        if allow_all_hosts && !allowed_hosts.is_empty() {
+            return Err(PyValueError::new_err(
+                "allowed_hosts cannot be combined with allow_all_hosts=True",
+            ));
+        }
+        let routes: Vec<RustRouteConfig> = routes.into_iter().map(|r| r.inner).collect();
+        let filter_hosts = effective_filter_hosts(&allowed_hosts, &routes, allow_all_hosts);
 
         Ok(Self {
             inner: RustProxyConfig {
                 bind_addr: addr,
                 bind_port,
-                allowed_hosts,
-                routes: routes.into_iter().map(|r| r.inner).collect(),
+                allowed_hosts: filter_hosts,
+                routes,
                 external_proxy: external_proxy.map(|e| e.inner),
                 max_connections,
                 direct_connect_ports: Vec::new(),
                 intercept_ca_dir: intercept_ca_dir.map(std::path::PathBuf::from),
                 intercept_parent_ca_pems,
             },
+            allowed_hosts,
+            allow_all_hosts,
         })
     }
 
@@ -426,7 +449,12 @@ impl ProxyConfig {
 
     #[getter]
     fn allowed_hosts(&self) -> Vec<String> {
-        self.inner.allowed_hosts.clone()
+        self.allowed_hosts.clone()
+    }
+
+    #[getter]
+    fn allow_all_hosts(&self) -> bool {
+        self.allow_all_hosts
     }
 
     #[getter]
@@ -446,11 +474,43 @@ impl ProxyConfig {
     fn __repr__(&self) -> String {
         format!(
             "ProxyConfig(hosts={}, routes={}, bind={}:{})",
-            self.inner.allowed_hosts.len(),
+            self.allowed_hosts.len(),
             self.inner.routes.len(),
             self.inner.bind_addr,
             self.inner.bind_port,
         )
+    }
+}
+
+fn effective_filter_hosts(
+    transparent_hosts: &[String],
+    routes: &[RustRouteConfig],
+    allow_all_hosts: bool,
+) -> Vec<String> {
+    if allow_all_hosts {
+        return Vec::new();
+    }
+
+    let mut hosts = transparent_hosts.to_vec();
+    for route in routes {
+        if let Some(host) = route_upstream_host(&route.upstream)
+            && !hosts.iter().any(|h| h.eq_ignore_ascii_case(&host))
+        {
+            hosts.push(host);
+        }
+    }
+
+    if hosts.is_empty() {
+        hosts.push(DENY_ALL_CONNECT_HOST.to_string());
+    }
+    hosts
+}
+
+fn route_upstream_host(upstream: &str) -> Option<String> {
+    let parsed = Url::parse(upstream).ok()?;
+    match parsed.scheme() {
+        "http" | "https" => parsed.host_str().map(|host| host.to_lowercase()),
+        _ => None,
     }
 }
 

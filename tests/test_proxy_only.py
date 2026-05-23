@@ -10,6 +10,7 @@ from nono_py import (
     AccessMode,
     CapabilitySet,
     ProxyConfig,
+    RouteConfig,
     sandboxed_exec,
     start_proxy,
 )
@@ -83,6 +84,36 @@ class TestProxyOnlyCapabilitySet:
         """sandbox_env should not package loader-control env vars."""
         with pytest.raises(ValueError, match="LD_PRELOAD"):
             proxy.sandbox_env(extra_env=[("LD_PRELOAD", "blocked-loader.so")])
+
+    def test_allowed_hosts_and_allow_all_hosts_conflict(self) -> None:
+        """Transparent CONNECT allow-all requires an explicit, unambiguous opt-in."""
+        with pytest.raises(ValueError, match="allow_all_hosts"):
+            ProxyConfig(allowed_hosts=["example.com"], allow_all_hosts=True)
+
+    def test_route_only_proxy_denies_non_route_connect(self) -> None:
+        """Routes alone must not make transparent CONNECT allow-all."""
+        proxy = start_proxy(
+            ProxyConfig(
+                routes=[
+                    RouteConfig(
+                        prefix="openai",
+                        upstream="https://api.openai.com",
+                    )
+                ]
+            )
+        )
+        try:
+            with socket.create_connection(("127.0.0.1", proxy.port), timeout=3) as s:
+                s.sendall(
+                    b"CONNECT google.com:443 HTTP/1.1\r\n"
+                    b"Host: google.com:443\r\n"
+                    b"\r\n"
+                )
+                response = s.recv(4096)
+        finally:
+            proxy.shutdown()
+
+        assert response.startswith(b"HTTP/1.1 403"), response
 
 
 class TestProxyOnlySandboxedExec:

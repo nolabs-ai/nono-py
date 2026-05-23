@@ -9,7 +9,7 @@ The proxy system provides domain-filtered, credential-injected network access fo
 
 ```python
 ProxyConfig(
-    allowed_hosts: list[str] = [],
+    allowed_hosts: list[str] | None = None,
     routes: list[RouteConfig] = [],
     external_proxy: ExternalProxyConfig | None = None,
     bind_addr: str = "127.0.0.1",
@@ -17,6 +17,7 @@ ProxyConfig(
     max_connections: int = 256,
     intercept_ca_dir: str | None = None,
     intercept_parent_ca_pems: bytes | None = None,
+    allow_all_hosts: bool = False,
 )
 ```
 
@@ -24,7 +25,7 @@ Configuration for the nono network filtering proxy.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `allowed_hosts` | `list[str]` | `[]` | Host allowlist. Empty = allow all (except hardcoded deny list). Supports `*.domain` wildcards. |
+| `allowed_hosts` | `list[str] \| None` | `None` | Transparent CONNECT host allowlist. `None` or `[]` denies transparent CONNECT except for configured route upstreams needed by reverse proxy forwarding. Supports `*.domain` wildcards. |
 | `routes` | `list[RouteConfig]` | `[]` | Reverse proxy credential injection routes. |
 | `external_proxy` | `ExternalProxyConfig \| None` | `None` | Enterprise proxy passthrough configuration. |
 | `bind_addr` | `str` | `"127.0.0.1"` | Address to bind the proxy to. |
@@ -32,6 +33,7 @@ Configuration for the nono network filtering proxy.
 | `max_connections` | `int` | `256` | Maximum concurrent connections. 0 = unlimited. |
 | `intercept_ca_dir` | `str \| None` | `None` | Directory containing CA certificates for TLS interception (ConnectIntercept mode). |
 | `intercept_parent_ca_pems` | `bytes \| None` | `None` | Parent CA PEM bytes for generating interception certificates. |
+| `allow_all_hosts` | `bool` | `False` | Explicit opt-in to allow transparent CONNECT to all hosts except the hardcoded metadata deny list. Cannot be combined with `allowed_hosts`. |
 
 ### Example
 

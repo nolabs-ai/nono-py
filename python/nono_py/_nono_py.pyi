@@ -488,7 +488,7 @@ class ProxyConfig:
 
     def __init__(
         self,
-        allowed_hosts: list[str] = ...,
+        allowed_hosts: list[str] | None = None,
         routes: list[RouteConfig] = ...,
         external_proxy: ExternalProxyConfig | None = None,
         bind_addr: str = "127.0.0.1",
@@ -496,6 +496,7 @@ class ProxyConfig:
         max_connections: int = 256,
         intercept_ca_dir: str | None = None,
         intercept_parent_ca_pems: bytes | None = None,
+        allow_all_hosts: bool = False,
     ) -> None: ...
     @property
     def bind_addr(self) -> str: ...
@@ -503,6 +504,8 @@ class ProxyConfig:
     def bind_port(self) -> int: ...
     @property
     def allowed_hosts(self) -> list[str]: ...
+    @property
+    def allow_all_hosts(self) -> bool: ...
     @property
     def routes(self) -> list[RouteConfig]: ...
     @property
