@@ -438,7 +438,7 @@ proxy.shutdown()
 Load network policy from JSON using the same field names as nono profiles:
 
 ```python
-from nono_py import load_policy, start_proxy
+from nono_py import CapabilitySet, load_policy, start_proxy
 
 policy = load_policy(
     """
@@ -460,6 +460,10 @@ proxy_config = policy.resolve_proxy_config(["proxy_web_demo"])
 assert proxy_config is not None
 
 proxy = start_proxy(proxy_config)
+caps = CapabilitySet()
+policy.resolve_groups(["proxy_web_demo"], caps)
+caps.proxy_only(proxy)
+env = proxy.sandbox_env()
 print(proxy_config.allowed_hosts)  # ["example.com"]
 proxy.shutdown()
 ```
@@ -467,6 +471,10 @@ proxy.shutdown()
 The same resolver also accepts the canonical `allow_domain` key used by the
 main nono crate's profile format. Domains not listed in the allowlist are
 blocked by omission.
+
+`resolve_groups()` blocks direct network access for proxy-filtered policy
+groups. Call `caps.proxy_only(proxy)` after `start_proxy()` to permit only the
+local proxy connection.
 
 ## Testing Sandbox Configurations
 

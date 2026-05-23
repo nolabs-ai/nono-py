@@ -37,6 +37,82 @@ class TestPolicyLoading:
         with pytest.raises(ValueError):
             load_policy("not json")
 
+    @pytest.mark.parametrize(
+        "payload, field",
+        [
+            ({"unexpected": True, "groups": {}}, "unexpected"),
+            (
+                {
+                    "groups": {
+                        "g": {
+                            "description": "bad group",
+                            "sandbox": {"network": False},
+                        }
+                    }
+                },
+                "sandbox",
+            ),
+            (
+                {
+                    "groups": {
+                        "g": {
+                            "description": "bad allow",
+                            "allow": {"filesystem": ["/tmp"]},
+                        }
+                    }
+                },
+                "filesystem",
+            ),
+            (
+                {
+                    "groups": {
+                        "g": {
+                            "description": "bad deny",
+                            "deny": {"filesystem": ["/tmp"]},
+                        }
+                    }
+                },
+                "filesystem",
+            ),
+            (
+                {
+                    "groups": {
+                        "g": {
+                            "description": "bad network",
+                            "network": {"blocked": True},
+                        }
+                    }
+                },
+                "blocked",
+            ),
+            (
+                {
+                    "groups": {
+                        "g": {
+                            "description": "bad route",
+                            "network": {
+                                "custom_credentials": {
+                                    "svc": {
+                                        "prefix": "svc",
+                                        "upstream": "https://api.example.com",
+                                        "proxy": {"mode": "unsupported"},
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+                "proxy",
+            ),
+        ],
+    )
+    def test_load_policy_rejects_unknown_security_fields(
+        self, payload: dict, field: str
+    ) -> None:
+        """Unknown policy fields should fail closed instead of being ignored."""
+        with pytest.raises(ValueError, match=field):
+            load_policy(json.dumps(payload))
+
 
 class TestPolicyResolution:
     """Tests for resolving groups into capability sets."""
@@ -178,6 +254,29 @@ class TestPolicyResolution:
 
         assert resolved.names == ["online"]
         assert not caps.is_network_blocked
+
+    def test_resolve_proxy_network_group_blocks_direct_network(self) -> None:
+        """Proxy-filtered network policies should fail closed until proxy_only is applied."""
+        policy = load_policy(
+            json.dumps(
+                {
+                    "groups": {
+                        "proxy_web": {
+                            "description": "Proxy-filtered web access",
+                            "network": {
+                                "allow_domain": ["api.openai.com"],
+                            },
+                        }
+                    }
+                }
+            )
+        )
+
+        caps = CapabilitySet()
+        resolved = policy.resolve_groups(["proxy_web"], caps)
+
+        assert resolved.names == ["proxy_web"]
+        assert caps.is_network_blocked
 
     def test_resolve_proxy_config_returns_allowed_hosts(self) -> None:
         """Proxy config should resolve allowed hosts from profile-style network JSON."""

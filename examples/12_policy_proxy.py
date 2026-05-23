@@ -41,7 +41,8 @@ def main() -> None:
     try:
         with tempfile.TemporaryDirectory() as workdir:
             caps = build_proxy_child_caps(workdir)
-            child_env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
+            caps.proxy_only(proxy)
+            child_env = proxy.sandbox_env()
             result = sandboxed_exec(
                 caps,
                 [sys.executable, "-c", PROXY_DEMO_CHILD_CODE],

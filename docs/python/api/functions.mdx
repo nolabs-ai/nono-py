@@ -261,7 +261,7 @@ Parse a policy JSON document into a `Policy` object.
 **Returns:** `Policy` with group inspection and resolution helpers.
 
 **Raises:**
-- `ValueError` - Invalid policy JSON
+- `ValueError` - Invalid policy JSON, including unknown policy fields
 
 ### Example
 
@@ -299,6 +299,13 @@ the main nono profile format:
 If multiple groups specify different `upstream_proxy` / `external_proxy`
 values, resolution fails with `ValueError` instead of silently overwriting the
 earlier proxy.
+
+Policy JSON is parsed strictly. Unknown fields are rejected instead of being
+ignored.
+
+When resolving groups with proxy-filtered network policy, `resolve_groups()`
+fails closed by blocking direct network access. After starting the proxy, call
+`caps.proxy_only(proxy)` and pass `proxy.sandbox_env()` to `sandboxed_exec()`.
 
 ---
 

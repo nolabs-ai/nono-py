@@ -13,11 +13,30 @@ use std::path::{Path, PathBuf};
 const EMBEDDED_POLICY_JSON: &str = include_str!("../data/policy.json");
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RustPolicy {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub meta: Option<PolicyMeta>,
     pub groups: HashMap<String, Group>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub profiles: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyMeta {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub version: Option<u32>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub schema_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Group {
     #[allow(dead_code)]
     pub description: String,
@@ -36,6 +55,7 @@ pub struct Group {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllowOps {
     #[serde(default)]
     pub read: Vec<String>,
@@ -46,6 +66,7 @@ pub struct AllowOps {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DenyOps {
     #[serde(default)]
     pub access: Vec<String>,
@@ -56,6 +77,7 @@ pub struct DenyOps {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkOps {
     #[serde(default)]
     pub block: bool,
@@ -79,6 +101,7 @@ pub struct NetworkOps {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyRouteConfig {
     pub prefix: String,
     pub upstream: String,
@@ -109,6 +132,7 @@ pub struct PolicyRouteConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyEndpointRule {
     pub method: String,
     pub path: String,
@@ -501,10 +525,10 @@ fn resolve_single_group(
         }
     }
 
-    if let Some(network) = &group.network
-        && network.block
-    {
-        caps.inner.set_network_blocked(true);
+    if let Some(network) = &group.network {
+        if network.block || network_requires_proxy(network) {
+            caps.inner.set_network_blocked(true);
+        }
     }
 
     if cfg!(target_os = "macos")
@@ -519,6 +543,15 @@ fn resolve_single_group(
     }
 
     Ok(needs_unlink_overrides)
+}
+
+fn network_requires_proxy(network: &NetworkOps) -> bool {
+    !network.allow_domain.is_empty()
+        || !network.credentials.is_empty()
+        || !network.custom_credentials.is_empty()
+        || network.upstream_proxy.is_some()
+        || !network.upstream_bypass.is_empty()
+        || network.max_connections.is_some()
 }
 
 fn add_fs_capability(
