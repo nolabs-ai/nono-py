@@ -525,10 +525,10 @@ fn resolve_single_group(
         }
     }
 
-    if let Some(network) = &group.network {
-        if network.block || network_requires_proxy(network) {
-            caps.inner.set_network_blocked(true);
-        }
+    if let Some(network) = &group.network
+        && (network.block || network_requires_proxy(network))
+    {
+        caps.inner.set_network_blocked(true);
     }
 
     if cfg!(target_os = "macos")
