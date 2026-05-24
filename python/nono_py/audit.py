@@ -33,9 +33,9 @@ Verification
   cross-check against an optional stored summary).
 - :class:`VerificationError` — raised on mismatch.
 
-Construction (TypedDict + builder primitives)
----------------------------------------------
-- TypedDicts for each event variant
+Construction (Pydantic models + builder primitives)
+---------------------------------------------------
+- Pydantic models for each event variant
   (:class:`SessionStartedEvent`, :class:`SessionEndedEvent`,
   :class:`CapabilityDecisionEvent`, :class:`UrlOpenEvent`,
   :class:`NetworkEvent`) and the on-disk record envelope
@@ -44,7 +44,7 @@ Construction (TypedDict + builder primitives)
   :func:`capability_decision`, :func:`url_open`, :func:`network`,
   plus :func:`approval_granted` / :func:`approval_denied` /
   :func:`approval_timeout` for the inner ``ApprovalDecision`` shape)
-  return correctly-typed dicts without making the caller remember the
+  return validated dicts without making the caller remember the
   field schema.
 - :class:`AlphaRecorder` — stateful builder that wraps event payloads
   in fully hashed records, advancing sequence and chain hash for the
@@ -62,10 +62,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import (
     IO,
+    Annotated,
     Any,
     Literal,
-    TypedDict,
 )
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 _TAIL_READ_CHUNK = 65536
 
@@ -410,30 +412,44 @@ def verify_log(
 # follow upstream nullability.
 
 
-class CapabilityRequestPayload(TypedDict, total=False):
+class _AuditModel(BaseModel):
+    """Strict Pydantic base for audit payloads shared with the Rust wire format."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return the plain dict shape written to NDJSON and expected by old callers."""
+        return self.model_dump(mode="json")
+
+
+HexDigest = Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F]{64}$")]
+
+
+class CapabilityRequestPayload(_AuditModel):
     """Payload of a capability request from the sandboxed child."""
 
     request_id: str
     path: str
-    access: str  # "Read" | "Write" | "ReadWrite"
+    access: Literal["Read", "Write", "ReadWrite"]
     reason: str | None
     child_pid: int
     session_id: str
 
 
-class _ApprovalDeniedInner(TypedDict):
+class _ApprovalDeniedInner(_AuditModel):
     reason: str
 
 
-class _ApprovalDeniedPayload(TypedDict):
+class _ApprovalDeniedPayload(_AuditModel):
     Denied: _ApprovalDeniedInner
 
 
 # ApprovalDecision is a serde-tagged enum: "Granted" | {"Denied": ...} | "Timeout".
 ApprovalDecision = Literal["Granted", "Timeout"] | _ApprovalDeniedPayload
+ApprovalDecisionInput = ApprovalDecision | dict[str, Any]
 
 
-class AuditEntryPayload(TypedDict):
+class AuditEntryPayload(_AuditModel):
     """One supervisor capability decision."""
 
     timestamp: str
@@ -443,7 +459,7 @@ class AuditEntryPayload(TypedDict):
     duration_ms: int
 
 
-class UrlOpenRequestPayload(TypedDict):
+class UrlOpenRequestPayload(_AuditModel):
     """Payload of a request to open a URL via the supervisor."""
 
     request_id: str
@@ -452,12 +468,12 @@ class UrlOpenRequestPayload(TypedDict):
     session_id: str
 
 
-class NetworkAuditEventPayload(TypedDict):
+class NetworkAuditEventPayload(_AuditModel):
     """Inner shape of a ``network`` event's ``event`` field."""
 
     timestamp_unix_ms: int
-    mode: str  # "connect" | "reverse" | "external"
-    decision: str  # "allow" | "deny"
+    mode: Literal["connect", "reverse", "external"]
+    decision: Literal["allow", "deny"]
     target: str
     port: int | None
     method: str | None
@@ -466,59 +482,76 @@ class NetworkAuditEventPayload(TypedDict):
     reason: str | None
 
 
-class SessionStartedEvent(TypedDict):
+class SessionStartedEvent(_AuditModel):
     type: Literal["session_started"]
     started: str
     command: list[str]
 
 
-class SessionEndedEvent(TypedDict):
+class SessionEndedEvent(_AuditModel):
     type: Literal["session_ended"]
     ended: str
     exit_code: int
 
 
-class CapabilityDecisionEvent(TypedDict):
+class CapabilityDecisionEvent(_AuditModel):
     type: Literal["capability_decision"]
     entry: AuditEntryPayload
 
 
-class UrlOpenEvent(TypedDict):
+class UrlOpenEvent(_AuditModel):
     type: Literal["url_open"]
     request: UrlOpenRequestPayload
     success: bool
     error: str | None
 
 
-class NetworkEvent(TypedDict):
+class NetworkEvent(_AuditModel):
     type: Literal["network"]
     event: NetworkAuditEventPayload
 
 
-AuditEvent = (
-    SessionStartedEvent | SessionEndedEvent | CapabilityDecisionEvent | UrlOpenEvent | NetworkEvent
-)
+AuditEvent = Annotated[
+    SessionStartedEvent | SessionEndedEvent | CapabilityDecisionEvent | UrlOpenEvent | NetworkEvent,
+    Field(discriminator="type"),
+]
 
 
-class AuditEventRecord(TypedDict):
+class AuditEventRecord(_AuditModel):
     """One line of ``audit-events.ndjson``."""
 
     sequence: int
-    prev_chain: str | None  # 64-char hex
-    leaf_hash: str  # 64-char hex
-    chain_hash: str  # 64-char hex
+    prev_chain: HexDigest | None
+    leaf_hash: HexDigest
+    chain_hash: HexDigest
     event_json: str | None
     event: AuditEvent
 
 
-def session_started(*, started: str, command: list[str]) -> SessionStartedEvent:
+_AUDIT_EVENT_ADAPTER: TypeAdapter[AuditEvent] = TypeAdapter(AuditEvent)
+_APPROVAL_DECISION_ADAPTER: TypeAdapter[ApprovalDecision] = TypeAdapter(ApprovalDecision)
+
+
+def _validate_event(event: AuditEvent | dict[str, Any]) -> AuditEvent:
+    return _AUDIT_EVENT_ADAPTER.validate_python(event)
+
+
+def _validate_approval_decision(decision: ApprovalDecisionInput) -> ApprovalDecision:
+    return _APPROVAL_DECISION_ADAPTER.validate_python(decision)
+
+
+def session_started(*, started: str, command: list[str]) -> dict[str, Any]:
     """Build a ``session_started`` event payload."""
-    return {"type": "session_started", "started": started, "command": list(command)}
+    return SessionStartedEvent(
+        type="session_started",
+        started=started,
+        command=list(command),
+    ).to_wire()
 
 
-def session_ended(*, ended: str, exit_code: int) -> SessionEndedEvent:
+def session_ended(*, ended: str, exit_code: int) -> dict[str, Any]:
     """Build a ``session_ended`` event payload."""
-    return {"type": "session_ended", "ended": ended, "exit_code": exit_code}
+    return SessionEndedEvent(type="session_ended", ended=ended, exit_code=exit_code).to_wire()
 
 
 def approval_granted() -> ApprovalDecision:
@@ -529,43 +562,44 @@ def approval_timeout() -> ApprovalDecision:
     return "Timeout"
 
 
-def approval_denied(reason: str) -> ApprovalDecision:
-    return {"Denied": {"reason": reason}}
+def approval_denied(reason: str) -> dict[str, Any]:
+    return _ApprovalDeniedPayload(Denied=_ApprovalDeniedInner(reason=reason)).to_wire()
 
 
 def capability_decision(
     *,
     timestamp: str,
     path: str,
-    access: str,
+    access: Literal["Read", "Write", "ReadWrite"],
     child_pid: int,
     session_id: str,
-    decision: ApprovalDecision,
+    decision: ApprovalDecisionInput,
     backend: str,
     duration_ms: int,
     request_id: str | None = None,
     reason: str | None = None,
-) -> CapabilityDecisionEvent:
+) -> dict[str, Any]:
     """Build a ``capability_decision`` event payload.
 
     ``request_id`` defaults to a fresh UUID4 hex if omitted.
     """
-    request: CapabilityRequestPayload = {
-        "request_id": request_id or uuid.uuid4().hex,
-        "path": path,
-        "access": access,
-        "reason": reason,
-        "child_pid": child_pid,
-        "session_id": session_id,
-    }
-    entry: AuditEntryPayload = {
-        "timestamp": timestamp,
-        "request": request,
-        "decision": decision,
-        "backend": backend,
-        "duration_ms": duration_ms,
-    }
-    return {"type": "capability_decision", "entry": entry}
+    return CapabilityDecisionEvent(
+        type="capability_decision",
+        entry=AuditEntryPayload(
+            timestamp=timestamp,
+            request=CapabilityRequestPayload(
+                request_id=request_id or uuid.uuid4().hex,
+                path=path,
+                access=access,
+                reason=reason,
+                child_pid=child_pid,
+                session_id=session_id,
+            ),
+            decision=_validate_approval_decision(decision),
+            backend=backend,
+            duration_ms=duration_ms,
+        ),
+    ).to_wire()
 
 
 def url_open(
@@ -576,42 +610,48 @@ def url_open(
     success: bool,
     error: str | None = None,
     request_id: str | None = None,
-) -> UrlOpenEvent:
+) -> dict[str, Any]:
     """Build a ``url_open`` event payload."""
-    request: UrlOpenRequestPayload = {
-        "request_id": request_id or uuid.uuid4().hex,
-        "url": url,
-        "child_pid": child_pid,
-        "session_id": session_id,
-    }
-    return {"type": "url_open", "request": request, "success": success, "error": error}
+    return UrlOpenEvent(
+        type="url_open",
+        request=UrlOpenRequestPayload(
+            request_id=request_id or uuid.uuid4().hex,
+            url=url,
+            child_pid=child_pid,
+            session_id=session_id,
+        ),
+        success=success,
+        error=error,
+    ).to_wire()
 
 
 def network(
     *,
     timestamp_unix_ms: int,
-    mode: str,
-    decision: str,
+    mode: Literal["connect", "reverse", "external"],
+    decision: Literal["allow", "deny"],
     target: str,
     port: int | None = None,
     method: str | None = None,
     path: str | None = None,
     status: int | None = None,
     reason: str | None = None,
-) -> NetworkEvent:
+) -> dict[str, Any]:
     """Build a ``network`` event payload."""
-    inner: NetworkAuditEventPayload = {
-        "timestamp_unix_ms": timestamp_unix_ms,
-        "mode": mode,
-        "decision": decision,
-        "target": target,
-        "port": port,
-        "method": method,
-        "path": path,
-        "status": status,
-        "reason": reason,
-    }
-    return {"type": "network", "event": inner}
+    return NetworkEvent(
+        type="network",
+        event=NetworkAuditEventPayload(
+            timestamp_unix_ms=timestamp_unix_ms,
+            mode=mode,
+            decision=decision,
+            target=target,
+            port=port,
+            method=method,
+            path=path,
+            status=status,
+            reason=reason,
+        ),
+    ).to_wire()
 
 
 # ---------------------------------------------------------------------------
@@ -654,23 +694,25 @@ class AlphaRecorder:
         with self._lock:
             return self._prev_chain.hex() if self._prev_chain is not None else None
 
-    def _build_record_locked(self, event: AuditEvent) -> AuditEventRecord:
-        event_json = json.dumps(event, separators=(",", ":"))
+    def _build_record_locked(self, event: AuditEvent | dict[str, Any]) -> dict[str, Any]:
+        validated_event = _validate_event(event)
+        wire_event = validated_event.to_wire()
+        event_json = json.dumps(wire_event, separators=(",", ":"))
         leaf = _hash_event_alpha(event_json.encode("utf-8"))
         chain = _hash_chain_alpha(self._prev_chain, leaf)
-        rec: AuditEventRecord = {
-            "sequence": self._next_seq,
-            "prev_chain": self._prev_chain.hex() if self._prev_chain else None,
-            "leaf_hash": leaf.hex(),
-            "chain_hash": chain.hex(),
-            "event_json": event_json,
-            "event": event,
-        }
+        rec = AuditEventRecord(
+            sequence=self._next_seq,
+            prev_chain=self._prev_chain.hex() if self._prev_chain else None,
+            leaf_hash=leaf.hex(),
+            chain_hash=chain.hex(),
+            event_json=event_json,
+            event=validated_event,
+        ).to_wire()
         self._next_seq += 1
         self._prev_chain = chain
         return rec
 
-    def record(self, event: AuditEvent) -> AuditEventRecord:
+    def record(self, event: AuditEvent | dict[str, Any]) -> dict[str, Any]:
         """Return one fully-hashed alpha record for ``event``.
 
         Canonical event JSON is stored on the record so that downstream
@@ -679,7 +721,7 @@ class AlphaRecorder:
         with self._lock:
             return self._build_record_locked(event)
 
-    def write(self, fh: IO[str], event: AuditEvent) -> AuditEventRecord:
+    def write(self, fh: IO[str], event: AuditEvent | dict[str, Any]) -> dict[str, Any]:
         """Build a record, append one JSONL line to ``fh``, flush, return it.
 
         The build + ``fh.write`` + ``fh.flush`` runs under the recorder's
@@ -707,6 +749,7 @@ __all__ = [
     "verify_log",
     # Event payload types
     "ApprovalDecision",
+    "ApprovalDecisionInput",
     "AuditEntryPayload",
     "AuditEvent",
     "AuditEventRecord",

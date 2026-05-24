@@ -22,6 +22,9 @@ classifiers = [
     "Topic :: Security",
     "Typing :: Typed",
 ]
+dependencies = [
+    "pydantic>=2,<3",
+]
 
 [project.urls]
 Homepage = "https://github.com/always-further/nono-py"
