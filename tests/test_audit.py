@@ -7,8 +7,10 @@ coverage elsewhere.
 """
 
 import pytest  # ty:ignore[unresolved-import]  # noqa: F401
+from pydantic import ValidationError
 
 from nono_py.audit import (
+    AlphaRecorder,
     approval_denied,
     approval_granted,
     approval_timeout,
@@ -84,6 +86,15 @@ class TestEventBuilders:
         )
         assert event["event"]["decision"] == "deny"
         assert event["event"]["reason"] == "host not in allowlist"
+
+    def test_network_rejects_invalid_mode(self) -> None:
+        with pytest.raises(ValidationError):
+            network(
+                timestamp_unix_ms=1700000000000,
+                mode="raw",
+                decision="allow",
+                target="api.example.com",
+            )
 
     def test_url_open_success(self) -> None:
         event = url_open(
@@ -176,6 +187,42 @@ class TestEventBuilders:
         request_id = event["entry"]["request"].get("request_id")
         assert request_id is not None
         assert len(request_id) == 32
+
+    def test_capability_decision_rejects_invalid_access(self) -> None:
+        with pytest.raises(ValidationError):
+            capability_decision(
+                timestamp="t",
+                path="/tmp",  # noqa: S108
+                access="Execute",
+                child_pid=1,
+                session_id="s",
+                decision=approval_granted(),
+                backend="b",
+                duration_ms=0,
+            )
+
+    def test_recorder_accepts_manual_capability_request_without_reason(self) -> None:
+        event = {
+            "type": "capability_decision",
+            "entry": {
+                "timestamp": "t",
+                "request": {
+                    "request_id": "r",
+                    "path": "/tmp",  # noqa: S108
+                    "access": "Read",
+                    "child_pid": 1,
+                    "session_id": "s",
+                },
+                "decision": "Granted",
+                "backend": "b",
+                "duration_ms": 0,
+            },
+        }
+
+        record = AlphaRecorder().record(event)
+
+        request = record["event"]["entry"]["request"]
+        assert request["reason"] is None
 
 
 class TestApprovalHelpers:
