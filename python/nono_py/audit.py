@@ -928,14 +928,14 @@ def verify_log(
 # follow upstream nullability.
 
 
-class _AuditModel(BaseModel):  # type: ignore[misc]
+class _AuditModel(BaseModel):  # type: ignore[misc, unused-ignore]
     """Strict Pydantic base for audit payloads shared with the Rust wire format."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     def to_wire(self) -> dict[str, Any]:
         """Return the plain dict shape written to NDJSON and expected by old callers."""
-        return cast(dict[str, Any], self.model_dump(mode="json"))
+        return cast(dict[str, Any], self.model_dump(mode="json"))  # type: ignore[redundant-cast, unused-ignore]
 
 
 HexDigest = Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F]{64}$")]
@@ -1136,11 +1136,17 @@ _APPROVAL_DECISION_ADAPTER: TypeAdapter[_ApprovalDecisionModelInput] = TypeAdapt
 
 
 def _validate_event(event: AuditEvent | dict[str, Any]) -> AuditEvent:
-    return cast(AuditEvent, _AUDIT_EVENT_ADAPTER.validate_python(event))
+    return cast(  # type: ignore[redundant-cast, unused-ignore]
+        AuditEvent,
+        _AUDIT_EVENT_ADAPTER.validate_python(event),
+    )
 
 
 def _validate_approval_decision(decision: ApprovalDecision) -> _ApprovalDecisionModelInput:
-    return cast(_ApprovalDecisionModelInput, _APPROVAL_DECISION_ADAPTER.validate_python(decision))
+    return cast(  # type: ignore[redundant-cast, unused-ignore]
+        _ApprovalDecisionModelInput,
+        _APPROVAL_DECISION_ADAPTER.validate_python(decision),
+    )
 
 
 def session_started(
