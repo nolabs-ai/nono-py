@@ -31,6 +31,12 @@ Verification
 - :func:`verify_log` — alpha-scheme integrity check (per-record sequence
   + prev_chain + leaf hash + chain hash; final Merkle root + chain head
   cross-check against an optional stored summary).
+- :func:`build_inclusion_proof` / :func:`verify_inclusion_proof` —
+  Merkle inclusion proofs for individual audit event leaves.
+- :func:`compute_session_digest`, :func:`build_ledger_record`,
+  :func:`iter_ledger`, :func:`verify_session_in_ledger`, and
+  :func:`validate_ledger_session_id` — the append-only cross-session
+  ledger (``ledger.ndjson``), hash-chained per record.
 - :class:`VerificationError` — raised on mismatch.
 
 Construction (Pydantic models + builder primitives)
@@ -350,9 +356,23 @@ def build_inclusion_proof(
     }
 
 
-def verify_inclusion_proof(proof: dict[str, Any]) -> bool:
-    """Verify an alpha Merkle inclusion proof."""
+def verify_inclusion_proof(
+    proof: dict[str, Any],
+    *,
+    expected_root: HashInput | None = None,
+) -> bool:
+    """Verify an alpha Merkle inclusion proof.
+
+    Without ``expected_root``, this checks internal consistency only:
+    every value verified against (``leaf_hash``, ``leaf_count``,
+    ``merkle_root``) comes from ``proof`` itself, so ``True`` means
+    "this proof commits this leaf to this root" — not that the root is
+    the real one. Callers must compare ``proof["merkle_root"]`` (and
+    ``leaf_count``) against a trusted integrity summary, or pass the
+    trusted root as ``expected_root`` to have that comparison done here.
+    """
     try:
+        trusted_root = _hash_input_to_bytes(expected_root) if expected_root is not None else None
         leaf_count = int(proof["leaf_count"])
         leaf_index = int(proof["leaf_index"])
         if leaf_count <= 0 or leaf_index < 0 or leaf_index >= leaf_count:
@@ -394,6 +414,8 @@ def verify_inclusion_proof(proof: dict[str, Any]) -> bool:
             next(siblings)
             return False
         except StopIteration:
+            if trusted_root is not None and computed != trusted_root:
+                return False
             return computed == merkle_root
     except (KeyError, TypeError, ValueError, VerificationError):
         return False
@@ -598,7 +620,12 @@ def build_ledger_record(
 
 
 def iter_ledger(ledger_path: PathLike) -> Iterator[LedgerRecordDict]:
-    """Yield parsed records from a ledger NDJSON file."""
+    """Yield parsed records from a ledger NDJSON file.
+
+    Raises:
+        FileNotFoundError: if the ledger file does not exist.
+        json.JSONDecodeError: if a line is malformed (caller may catch).
+    """
     with Path(ledger_path).open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -607,11 +634,53 @@ def iter_ledger(ledger_path: PathLike) -> Iterator[LedgerRecordDict]:
             yield json.loads(line)
 
 
+_LEDGER_RECORD_KEYS = (
+    "sequence",
+    "prev_chain",
+    "session_id",
+    "session_digest",
+    "completed_at",
+    "chain_hash",
+)
+
+
+def _checked_ledger_records(path: Path) -> Iterator[LedgerRecordDict]:
+    """Like :func:`iter_ledger`, but malformed records raise VerificationError."""
+    records = iter_ledger(path)
+    line_number = 0
+    while True:
+        line_number += 1
+        try:
+            record = next(records)
+        except StopIteration:
+            return
+        except json.JSONDecodeError as e:
+            raise VerificationError(
+                f"audit ledger record at line {line_number} is not valid JSON"
+            ) from e
+        if not isinstance(record, dict):
+            raise VerificationError(
+                f"audit ledger record at line {line_number} is not a JSON object"
+            )
+        missing = [key for key in _LEDGER_RECORD_KEYS if key not in record]
+        if missing:
+            raise VerificationError(
+                f"audit ledger record at line {line_number} is missing fields: "
+                + ", ".join(missing)
+            )
+        yield record
+
+
 def verify_session_in_ledger(
     ledger_path: PathLike,
     metadata: Mapping[str, Any] | Any,
 ) -> LedgerVerificationResultDict:
-    """Verify an alpha audit ledger and check whether it contains `metadata`."""
+    """Verify an alpha audit ledger and check whether it contains `metadata`.
+
+    Raises:
+        VerificationError: if a ledger record is malformed or the hash
+            chain does not verify.
+    """
     path = Path(ledger_path)
     expected_digest = compute_session_digest(metadata)
     if not path.exists():
@@ -632,7 +701,7 @@ def verify_session_in_ledger(
     session_found = False
     session_digest_matches = False
 
-    for line_number, record in enumerate(iter_ledger(path), start=1):
+    for line_number, record in enumerate(_checked_ledger_records(path), start=1):
         if record.get("sequence") != entry_count:
             raise VerificationError(f"audit ledger sequence mismatch at line {line_number}")
         if record.get("prev_chain") != previous_chain:
@@ -1081,11 +1150,16 @@ def session_started(
     redaction_policy: dict[str, Any] | ScrubPolicyDiffPayload | None = None,
 ) -> dict[str, Any]:
     """Build a ``session_started`` event payload."""
+    policy = (
+        ScrubPolicyDiffPayload.model_validate(redaction_policy)
+        if isinstance(redaction_policy, dict)
+        else redaction_policy
+    )
     return SessionStartedEvent(
         type="session_started",
         started=started,
         command=list(command),
-        redaction_policy=redaction_policy,
+        redaction_policy=policy,
     ).to_wire()
 
 

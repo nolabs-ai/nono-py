@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from nono_py.audit import (
     AlphaRecorder,
+    VerificationError,
     approval_denied,
     approval_granted,
     approval_timeout,
@@ -332,6 +333,27 @@ class TestInclusionProofs:
 
         assert verify_inclusion_proof(proof) is False
 
+    def test_inclusion_proof_checks_expected_root(self) -> None:
+        proof = build_inclusion_proof(["01" * 32, "02" * 32, "03" * 32], 1)
+
+        assert verify_inclusion_proof(proof, expected_root=proof["merkle_root"]) is True
+        assert verify_inclusion_proof(proof, expected_root="0a" * 32) is False
+
+    def test_self_consistent_proof_fails_against_trusted_root(self) -> None:
+        # Internally consistent but rooted in itself — must not verify
+        # against the real root.
+        real = build_inclusion_proof(["01" * 32, "02" * 32], 0)
+        forged = {
+            "leaf_index": 0,
+            "leaf_count": 1,
+            "leaf_hash": "ab" * 32,
+            "merkle_root": "ab" * 32,
+            "siblings": [],
+        }
+
+        assert verify_inclusion_proof(forged) is True
+        assert verify_inclusion_proof(forged, expected_root=real["merkle_root"]) is False
+
 
 def _sample_metadata(session_id: str = "20260421-200000-11111") -> dict[str, object]:
     return {
@@ -397,6 +419,29 @@ class TestLedger:
         with pytest.raises(Exception, match="chain hash"):
             verify_session_in_ledger(ledger, metadata)
 
+    def test_ledger_rejects_invalid_json_line(self, tmp_path) -> None:
+        ledger = tmp_path / "ledger.ndjson"
+        ledger.write_text("{not json\n")
+
+        with pytest.raises(VerificationError, match="not valid JSON"):
+            verify_session_in_ledger(ledger, _sample_metadata())
+
+    def test_ledger_rejects_record_missing_fields(self, tmp_path) -> None:
+        record = build_ledger_record(_sample_metadata(), sequence=0, previous_chain=None)
+        del record["session_id"]
+        ledger = tmp_path / "ledger.ndjson"
+        ledger.write_text(json.dumps(record) + "\n")
+
+        with pytest.raises(VerificationError, match="missing fields: session_id"):
+            verify_session_in_ledger(ledger, _sample_metadata())
+
+    def test_ledger_rejects_non_object_record(self, tmp_path) -> None:
+        ledger = tmp_path / "ledger.ndjson"
+        ledger.write_text("[1, 2, 3]\n")
+
+        with pytest.raises(VerificationError, match="not a JSON object"):
+            verify_session_in_ledger(ledger, _sample_metadata())
+
     def test_session_digest_rejects_missing_protected_field(self) -> None:
         metadata = _sample_metadata()
         del metadata["audit_event_count"]
@@ -410,9 +455,10 @@ class TestRustGoldenVectors:
 
     def test_session_digest_matches_rust(self) -> None:
         vectors = _audit_vectors()
-        assert compute_session_digest(vectors["session_metadata"]) == vectors["ledger"][
-            "session_digest"
-        ]
+        assert (
+            compute_session_digest(vectors["session_metadata"])
+            == vectors["ledger"]["session_digest"]
+        )
 
     def test_ledger_chain_hash_matches_rust(self) -> None:
         vectors = _audit_vectors()
