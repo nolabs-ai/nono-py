@@ -14,6 +14,9 @@ import pytest  # ty:ignore[unresolved-import]  # noqa: F401
 from pydantic import ValidationError
 
 from nono_py.audit import (
+    AUDIT_ATTESTATION_BUNDLE_FILENAME,
+    AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA,
+    IN_TOTO_PAYLOAD_TYPE,
     AlphaRecorder,
     VerificationError,
     approval_denied,
@@ -23,16 +26,27 @@ from nono_py.audit import (
     build_ledger_record,
     capability_decision,
     compute_session_digest,
+    dsse_pae,
     network,
     session_ended,
     session_started,
+    sign_audit_attestation_bundle,
     url_open,
     validate_ledger_session_id,
+    verify_audit_attestation,
+    verify_audit_attestation_bundle,
     verify_inclusion_proof,
     verify_session_in_ledger,
+    write_audit_attestation,
 )
 
 _AUDIT_VECTOR_PATH = Path(__file__).parent / "fixtures" / "audit_alpha_vectors.json"
+_TEST_SIGNING_KEY_PEM = b"""-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgskOkyJkTwlMZkm/L
+eEleLY6bARaHFnqauYJqxNoJWvihRANCAASt6g2Zt0STlgF+wZ64JzdDRlpPeNr1
+h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
+-----END PRIVATE KEY-----
+"""
 
 
 def _audit_vectors() -> dict[str, Any]:
@@ -373,6 +387,17 @@ def _sample_metadata(session_id: str = "20260421-200000-11111") -> dict[str, obj
     }
 
 
+def _attested_metadata() -> dict[str, object]:
+    metadata = _sample_metadata()
+    metadata["audit_integrity"] = {
+        "hash_algorithm": "sha256",
+        "event_count": 2,
+        "chain_head": "11" * 32,
+        "merkle_root": "22" * 32,
+    }
+    return metadata
+
+
 class TestLedger:
     """Tests for alpha audit ledger helpers."""
 
@@ -464,6 +489,106 @@ class TestLedger:
 
         with pytest.raises(Exception, match="missing protected digest fields: audit_event_count"):
             compute_session_digest(metadata)
+
+
+class TestAuditAttestation:
+    """Tests for keyed DSSE audit attestation helpers."""
+
+    def test_dsse_pae_matches_spec_vector(self) -> None:
+        assert (
+            dsse_pae("http://example.com/HelloWorld", b"hello world")
+            == b"DSSEv1 29 http://example.com/HelloWorld 11 hello world"
+        )
+        assert dsse_pae(IN_TOTO_PAYLOAD_TYPE, b"{}").startswith(b"DSSEv1 28 ")
+
+    def test_sign_and_verify_audit_attestation_bundle(self) -> None:
+        metadata = _attested_metadata()
+        bundle_json, summary = sign_audit_attestation_bundle(metadata, _TEST_SIGNING_KEY_PEM)
+        metadata["audit_attestation"] = summary
+
+        result = verify_audit_attestation_bundle(bundle_json, metadata)
+
+        assert summary["predicate_type"] == AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA
+        assert summary["bundle_filename"] == AUDIT_ATTESTATION_BUNDLE_FILENAME
+        assert result["present"] is True
+        assert result["signature_verified"] is True
+        assert result["key_id_matches"] is True
+        assert result["merkle_root_matches"] is True
+        assert result["session_id_matches"] is True
+        assert result["verification_error"] is None
+
+    def test_verify_accepts_expected_public_key_pin(self) -> None:
+        metadata = _attested_metadata()
+        bundle_json, summary = sign_audit_attestation_bundle(metadata, _TEST_SIGNING_KEY_PEM)
+        metadata["audit_attestation"] = summary
+
+        result = verify_audit_attestation_bundle(
+            bundle_json,
+            metadata,
+            expected_public_key=summary["public_key"],
+        )
+
+        assert result["expected_public_key_matches"] is True
+        assert result["signature_verified"] is True
+
+    def test_verify_rejects_wrong_expected_public_key(self) -> None:
+        metadata = _attested_metadata()
+        bundle_json, summary = sign_audit_attestation_bundle(metadata, _TEST_SIGNING_KEY_PEM)
+        metadata["audit_attestation"] = summary
+
+        result = verify_audit_attestation_bundle(
+            bundle_json,
+            metadata,
+            expected_public_key=b"wrong key",
+        )
+
+        assert result["expected_public_key_matches"] is False
+        assert result["signature_verified"] is False
+        assert "provided public key" in str(result["verification_error"])
+
+    def test_sign_rejects_non_canonical_key_id(self) -> None:
+        with pytest.raises(VerificationError, match="SPKI public key"):
+            sign_audit_attestation_bundle(
+                _attested_metadata(),
+                _TEST_SIGNING_KEY_PEM,
+                key_id="nono-keystore:default",
+            )
+
+    def test_verify_detects_tampered_bundle_payload(self) -> None:
+        metadata = _attested_metadata()
+        bundle_json, summary = sign_audit_attestation_bundle(metadata, _TEST_SIGNING_KEY_PEM)
+        metadata["audit_attestation"] = summary
+        bundle = json.loads(bundle_json)
+        bundle["dsseEnvelope"]["payload"] = "dGFtcGVyZWQ"
+
+        result = verify_audit_attestation_bundle(bundle, metadata)
+
+        assert result["signature_verified"] is False
+        assert result["verification_error"] is not None
+
+    def test_verify_detects_merkle_root_mismatch(self) -> None:
+        metadata = _attested_metadata()
+        bundle_json, summary = sign_audit_attestation_bundle(metadata, _TEST_SIGNING_KEY_PEM)
+        metadata["audit_attestation"] = summary
+        changed = dict(metadata)
+        changed["audit_integrity"] = dict(metadata["audit_integrity"])
+        changed["audit_integrity"]["merkle_root"] = "33" * 32
+
+        result = verify_audit_attestation_bundle(bundle_json, changed)
+
+        assert result["signature_verified"] is False
+        assert result["merkle_root_matches"] is False
+        assert "Merkle root" in str(result["verification_error"])
+
+    def test_write_and_verify_audit_attestation_from_session_dir(self, tmp_path: Path) -> None:
+        metadata = _attested_metadata()
+        summary = write_audit_attestation(tmp_path, metadata, _TEST_SIGNING_KEY_PEM)
+        metadata["audit_attestation"] = summary
+
+        result = verify_audit_attestation(tmp_path, metadata)
+
+        assert (tmp_path / AUDIT_ATTESTATION_BUNDLE_FILENAME).exists()
+        assert result["signature_verified"] is True
 
 
 class TestRustGoldenVectors:

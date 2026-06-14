@@ -23,6 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "cryptography>=42",
     "pydantic>=2,<3",
 ]
 

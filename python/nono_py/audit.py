@@ -59,6 +59,7 @@ Construction (Pydantic models + builder primitives)
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -95,6 +96,10 @@ PathLike = str | Path
 
 AUDIT_EVENTS_FILENAME = "audit-events.ndjson"
 AUDIT_LEDGER_FILENAME = "ledger.ndjson"
+AUDIT_ATTESTATION_BUNDLE_FILENAME = "audit-attestation.bundle"
+AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA = "https://nono.sh/attestation/audit-session/alpha"
+IN_TOTO_PAYLOAD_TYPE = "application/vnd.in-toto+json"
+IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 
 EVENT_TYPES = frozenset(
     {
@@ -290,6 +295,63 @@ class LedgerVerificationResultDict(TypedDict):
     ledger_head: str | None
 
 
+class AuditAttestationSummaryDict(TypedDict):
+    """Signed attestation metadata stored on session metadata."""
+
+    predicate_type: str
+    key_id: str
+    public_key: str
+    bundle_filename: str
+
+
+class AuditAttestationVerificationResultDict(TypedDict):
+    """JSON shape returned by audit-attestation verification."""
+
+    present: bool
+    predicate_type: str | None
+    key_id: str | None
+    key_id_matches: bool
+    signature_verified: bool
+    merkle_root_matches: bool
+    session_id_matches: bool
+    expected_public_key_matches: bool | None
+    verification_error: str | None
+
+
+class _AttestationModel(BaseModel):  # type: ignore[misc]
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+
+
+class _DsseSignatureModel(_AttestationModel):
+    sig: str
+    keyid: str | None = None
+
+
+class _DsseEnvelopeModel(_AttestationModel):
+    payload_type: str = Field(alias="payloadType")
+    payload: str
+    signatures: list[_DsseSignatureModel]
+
+
+class _PublicKeyMaterialModel(_AttestationModel):
+    hint: str
+
+
+class _VerificationMaterialModel(_AttestationModel):
+    public_key: _PublicKeyMaterialModel = Field(alias="publicKey")
+    tlog_entries: list[Any] = Field(default_factory=list, alias="tlogEntries")
+    timestamp_verification_data: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="timestampVerificationData",
+    )
+
+
+class _SigstoreDsseBundleModel(_AttestationModel):
+    media_type: str = Field(alias="mediaType")
+    verification_material: _VerificationMaterialModel = Field(alias="verificationMaterial")
+    dsse_envelope: _DsseEnvelopeModel = Field(alias="dsseEnvelope")
+
+
 def _hash_input_to_bytes(value: HashInput) -> bytes:
     if isinstance(value, bytes):
         if len(value) != 32:
@@ -428,6 +490,443 @@ def _metadata_to_dict(metadata: Mapping[str, Any] | Any) -> dict[str, Any]:
     if callable(to_json):
         return dict(json.loads(to_json()))
     raise TypeError("metadata must be a mapping or expose to_json()")
+
+
+def _json_compact(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64_decode_flexible(value: str) -> bytes:
+    compact = "".join(value.split()).rstrip("=")
+    compact = compact.replace("-", "+").replace("_", "/")
+    compact += "=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(compact, validate=True)
+    except ValueError as e:
+        raise VerificationError(f"invalid base64: {value!r}") from e
+
+
+def _pae(payload_type: str, payload: bytes) -> bytes:
+    header = f"DSSEv1 {len(payload_type)} {payload_type} {len(payload)} ".encode("ascii")
+    return header + payload
+
+
+def dsse_pae(payload_type: str, payload: bytes) -> bytes:
+    """Return DSSE Pre-Authentication Encoding bytes for a payload."""
+    return _pae(payload_type, payload)
+
+
+def _load_public_key_der(value: bytes | str) -> bytes:
+    if isinstance(value, bytes):
+        if value.startswith(b"-----BEGIN PUBLIC KEY-----"):
+            from cryptography.hazmat.primitives import serialization
+
+            public_key = serialization.load_pem_public_key(value)
+            return public_key.public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        return value
+
+    text = value.strip()
+    if text.startswith("-----BEGIN PUBLIC KEY-----"):
+        return _load_public_key_der(text.encode("utf-8"))
+    return _b64_decode_flexible(text)
+
+
+def _load_p256_private_key(private_key_pem: bytes | str, password: bytes | None) -> Any:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key_bytes = private_key_pem.encode("utf-8") if isinstance(private_key_pem, str) else private_key_pem
+    if key_bytes.lstrip().startswith(b"-----BEGIN"):
+        private_key = serialization.load_pem_private_key(key_bytes, password=password)
+    else:
+        private_key = serialization.load_der_private_key(key_bytes, password=password)
+
+    if not isinstance(private_key, ec.EllipticCurvePrivateKey):
+        raise VerificationError("audit attestation signing key must be an ECDSA P-256 private key")
+    if not isinstance(private_key.curve, ec.SECP256R1):
+        raise VerificationError("audit attestation signing key must use the P-256 curve")
+    return private_key
+
+
+def _verify_p256_signature(public_key_der: bytes, pae_bytes: bytes, signature: bytes) -> None:
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    public_key = serialization.load_der_public_key(public_key_der)
+    if not isinstance(public_key, ec.EllipticCurvePublicKey):
+        raise VerificationError("audit attestation public key must be an ECDSA P-256 public key")
+    if not isinstance(public_key.curve, ec.SECP256R1):
+        raise VerificationError("audit attestation public key must use the P-256 curve")
+    try:
+        public_key.verify(signature, pae_bytes, ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature as e:
+        raise VerificationError("ECDSA signature verification failed") from e
+
+
+def _decode_attestation_statement(bundle: _SigstoreDsseBundleModel) -> dict[str, Any]:
+    envelope = bundle.dsse_envelope
+    if envelope.payload_type != IN_TOTO_PAYLOAD_TYPE:
+        raise VerificationError(
+            "unexpected DSSE payloadType: "
+            f"expected {IN_TOTO_PAYLOAD_TYPE}, got {envelope.payload_type}"
+        )
+    payload = _b64_decode_flexible(envelope.payload)
+    try:
+        statement = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise VerificationError(f"invalid DSSE in-toto statement payload: {e}") from e
+    if not isinstance(statement, dict):
+        raise VerificationError("DSSE payload is not an in-toto statement object")
+    if statement.get("_type") != IN_TOTO_STATEMENT_TYPE:
+        raise VerificationError(
+            "unexpected in-toto statement type: "
+            f"expected {IN_TOTO_STATEMENT_TYPE}, got {statement.get('_type')}"
+        )
+    return statement
+
+
+def _parse_attestation_bundle(bundle: Mapping[str, Any] | str | bytes) -> _SigstoreDsseBundleModel:
+    if isinstance(bundle, bytes):
+        bundle = bundle.decode("utf-8")
+    if isinstance(bundle, str):
+        try:
+            bundle = json.loads(bundle)
+        except json.JSONDecodeError as e:
+            raise VerificationError(f"invalid audit attestation bundle JSON: {e}") from e
+    return cast(_SigstoreDsseBundleModel, _SigstoreDsseBundleModel.model_validate(bundle))
+
+
+def _audit_attestation_summary(metadata: Mapping[str, Any] | Any) -> AuditAttestationSummaryDict | None:
+    summary = _metadata_to_dict(metadata).get("audit_attestation")
+    if summary is None:
+        return None
+    if not isinstance(summary, Mapping):
+        raise VerificationError("audit_attestation metadata must be an object")
+    return {
+        "predicate_type": str(summary["predicate_type"]),
+        "key_id": str(summary["key_id"]),
+        "public_key": str(summary["public_key"]),
+        "bundle_filename": str(summary["bundle_filename"]),
+    }
+
+
+def _audit_integrity_summary(metadata: Mapping[str, Any] | Any) -> Mapping[str, Any] | None:
+    integrity = _metadata_to_dict(metadata).get("audit_integrity")
+    if integrity is None:
+        return None
+    if not isinstance(integrity, Mapping):
+        raise VerificationError("audit_integrity metadata must be an object")
+    return integrity
+
+
+def _attestation_failure(
+    summary: AuditAttestationSummaryDict,
+    expected_public_key_matches: bool | None,
+    verification_error: str,
+) -> AuditAttestationVerificationResultDict:
+    return {
+        "present": True,
+        "predicate_type": summary["predicate_type"],
+        "key_id": summary["key_id"],
+        "key_id_matches": False,
+        "signature_verified": False,
+        "merkle_root_matches": False,
+        "session_id_matches": False,
+        "expected_public_key_matches": expected_public_key_matches,
+        "verification_error": verification_error,
+    }
+
+
+def sign_audit_attestation_bundle(
+    metadata: Mapping[str, Any] | Any,
+    private_key_pem: bytes | str,
+    *,
+    key_id: str | None = None,
+    password: bytes | None = None,
+    redaction_policy: Mapping[str, Any] | None = None,
+) -> tuple[str, AuditAttestationSummaryDict]:
+    """Build and sign an alpha audit-attestation DSSE bundle.
+
+    The private key must be an ECDSA P-256 key in PEM or DER form. The
+    returned bundle is Sigstore bundle v0.3 JSON; the returned summary is the
+    metadata shape stored under ``session["audit_attestation"]``.
+    """
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    meta = _metadata_to_dict(metadata)
+    integrity = _audit_integrity_summary(meta)
+    if integrity is None:
+        raise VerificationError("audit attestation requires audit integrity to be enabled")
+
+    private_key = _load_p256_private_key(private_key_pem, password)
+    public_key_der = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    computed_key_id = hashlib.sha256(public_key_der).hexdigest()
+    if key_id is not None and key_id != computed_key_id:
+        raise VerificationError(
+            "audit attestation key_id must be the SHA-256 hex digest of the SPKI public key"
+        )
+    signer_key_id = computed_key_id
+
+    predicate = {
+        "version": 1,
+        "session_id": meta["session_id"],
+        "started": meta["started"],
+        "ended": meta["ended"],
+        "command": list(meta["command"]),
+        "redaction_policy": dict(redaction_policy) if redaction_policy is not None else None,
+        "audit_log": {
+            "hash_algorithm": integrity["hash_algorithm"],
+            "event_count": integrity["event_count"],
+            "chain_head": _hash_hex(integrity["chain_head"]),
+            "merkle_root": _hash_hex(integrity["merkle_root"]),
+        },
+        "signer": {
+            "kind": "keyed",
+            "key_id": signer_key_id,
+        },
+    }
+    statement = {
+        "_type": IN_TOTO_STATEMENT_TYPE,
+        "subject": [
+            {
+                "name": f"audit-session:{meta['session_id']}",
+                "digest": {"sha256": _hash_hex(integrity["merkle_root"])},
+            }
+        ],
+        "predicateType": AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA,
+        "predicate": predicate,
+    }
+    payload = _json_compact(statement).encode("utf-8")
+    signature = private_key.sign(_pae(IN_TOTO_PAYLOAD_TYPE, payload), ec.ECDSA(hashes.SHA256()))
+    bundle = {
+        "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "verificationMaterial": {
+            "publicKey": {"hint": computed_key_id},
+            "tlogEntries": [],
+            "timestampVerificationData": {},
+        },
+        "dsseEnvelope": {
+            "payloadType": IN_TOTO_PAYLOAD_TYPE,
+            "payload": _b64url_encode(payload),
+            "signatures": [{"sig": _b64url_encode(signature)}],
+        },
+    }
+    summary: AuditAttestationSummaryDict = {
+        "predicate_type": AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA,
+        "key_id": signer_key_id,
+        "public_key": base64.b64encode(public_key_der).decode("ascii"),
+        "bundle_filename": AUDIT_ATTESTATION_BUNDLE_FILENAME,
+    }
+    return json.dumps(bundle, indent=2, ensure_ascii=False), summary
+
+
+def write_audit_attestation(
+    session_dir: PathLike,
+    metadata: Mapping[str, Any] | Any,
+    private_key_pem: bytes | str,
+    *,
+    key_id: str | None = None,
+    password: bytes | None = None,
+    redaction_policy: Mapping[str, Any] | None = None,
+) -> AuditAttestationSummaryDict:
+    """Sign an audit attestation and write the bundle into ``session_dir``."""
+    bundle_json, summary = sign_audit_attestation_bundle(
+        metadata,
+        private_key_pem,
+        key_id=key_id,
+        password=password,
+        redaction_policy=redaction_policy,
+    )
+    path = Path(session_dir) / summary["bundle_filename"]
+    path.write_text(bundle_json, encoding="utf-8")
+    return summary
+
+
+def verify_audit_attestation_bundle(
+    bundle: Mapping[str, Any] | str | bytes,
+    metadata: Mapping[str, Any] | Any,
+    *,
+    expected_public_key: bytes | str | None = None,
+) -> AuditAttestationVerificationResultDict:
+    """Verify a keyed alpha audit-attestation DSSE bundle."""
+    expected_public_key_matches = expected_public_key is not None
+    summary = _audit_attestation_summary(metadata)
+    if summary is None:
+        return {
+            "present": False,
+            "predicate_type": None,
+            "key_id": None,
+            "key_id_matches": False,
+            "signature_verified": False,
+            "merkle_root_matches": False,
+            "session_id_matches": False,
+            "expected_public_key_matches": False if expected_public_key_matches else None,
+            "verification_error": (
+                "session has no audit attestation to verify against provided public key"
+                if expected_public_key_matches
+                else None
+            ),
+        }
+
+    integrity = _audit_integrity_summary(metadata)
+    if integrity is None:
+        return _attestation_failure(
+            summary,
+            expected_public_key_matches or None,
+            "session has audit attestation metadata but no audit integrity summary",
+        )
+
+    try:
+        parsed = _parse_attestation_bundle(bundle)
+        statement = _decode_attestation_statement(parsed)
+        predicate_type = str(statement.get("predicateType"))
+        if predicate_type != AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA:
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "wrong bundle type: "
+                f"expected {AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA}, got {predicate_type}",
+            )
+        predicate = statement.get("predicate")
+        if not isinstance(predicate, Mapping):
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation predicate is not an object",
+            )
+        signer = predicate.get("signer")
+        if not isinstance(signer, Mapping) or signer.get("kind") != "keyed":
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation must be keyed",
+            )
+        signer_key_id = signer.get("key_id") or parsed.verification_material.public_key.hint
+
+        public_key_der = _b64_decode_flexible(summary["public_key"])
+        recomputed_key_id = hashlib.sha256(public_key_der).hexdigest()
+        if recomputed_key_id != summary["key_id"]:
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation metadata key mismatch: "
+                f"expected {summary['key_id']}, got {recomputed_key_id}",
+            )
+        if signer_key_id != summary["key_id"]:
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation signer key mismatch: "
+                f"expected {summary['key_id']}, got {signer_key_id}",
+            )
+        if expected_public_key is not None and _load_public_key_der(expected_public_key) != public_key_der:
+            return _attestation_failure(
+                summary,
+                False,
+                "provided public key does not match the attested signer key",
+            )
+
+        envelope = parsed.dsse_envelope
+        if not envelope.signatures:
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation DSSE envelope has no signatures",
+            )
+        payload = _b64_decode_flexible(envelope.payload)
+        signature = _b64_decode_flexible(envelope.signatures[0].sig)
+        _verify_p256_signature(
+            public_key_der,
+            _pae(envelope.payload_type, payload),
+            signature,
+        )
+
+        subjects = statement.get("subject")
+        if not isinstance(subjects, list) or not subjects:
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation statement has no subjects",
+            )
+        first_subject = subjects[0]
+        digest = first_subject.get("digest") if isinstance(first_subject, Mapping) else None
+        attested_root = digest.get("sha256") if isinstance(digest, Mapping) else None
+        if attested_root != _hash_hex(integrity["merkle_root"]):
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation Merkle root does not match session integrity summary",
+            )
+        if predicate.get("session_id") != _metadata_to_dict(metadata)["session_id"]:
+            return _attestation_failure(
+                summary,
+                expected_public_key_matches or None,
+                "audit attestation session_id mismatch: "
+                f"expected {_metadata_to_dict(metadata)['session_id']}, got {predicate.get('session_id')}",
+            )
+    except (KeyError, TypeError, ValueError, VerificationError) as e:
+        return _attestation_failure(summary, expected_public_key_matches or None, str(e))
+
+    return {
+        "present": True,
+        "predicate_type": AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA,
+        "key_id": summary["key_id"],
+        "key_id_matches": True,
+        "signature_verified": True,
+        "merkle_root_matches": True,
+        "session_id_matches": True,
+        "expected_public_key_matches": True if expected_public_key_matches else None,
+        "verification_error": None,
+    }
+
+
+def verify_audit_attestation(
+    session_dir: PathLike,
+    metadata: Mapping[str, Any] | Any,
+    *,
+    expected_public_key: bytes | str | None = None,
+) -> AuditAttestationVerificationResultDict:
+    """Load and verify the audit-attestation bundle referenced by metadata."""
+    summary = _audit_attestation_summary(metadata)
+    if summary is None:
+        return verify_audit_attestation_bundle(
+            b"{}",
+            metadata,
+            expected_public_key=expected_public_key,
+        )
+
+    bundle_path = Path(session_dir) / summary["bundle_filename"]
+    if not bundle_path.exists():
+        return _attestation_failure(
+            summary,
+            (expected_public_key is not None) or None,
+            f"missing audit attestation bundle: {bundle_path}",
+        )
+    try:
+        bundle_json = bundle_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return _attestation_failure(
+            summary,
+            (expected_public_key is not None) or None,
+            f"failed to read audit attestation bundle: {e}",
+        )
+    return verify_audit_attestation_bundle(
+        bundle_json,
+        metadata,
+        expected_public_key=expected_public_key,
+    )
 
 
 def _hash_hex(value: Any) -> str:
@@ -1392,6 +1891,10 @@ class AlphaRecorder:
 __all__ = [
     "AUDIT_EVENTS_FILENAME",
     "AUDIT_LEDGER_FILENAME",
+    "AUDIT_ATTESTATION_BUNDLE_FILENAME",
+    "AUDIT_ATTESTATION_PREDICATE_TYPE_ALPHA",
+    "IN_TOTO_PAYLOAD_TYPE",
+    "IN_TOTO_STATEMENT_TYPE",
     "EVENT_TYPES",
     "EVENT_DOMAIN_ALPHA",
     "CHAIN_DOMAIN_ALPHA",
@@ -1406,6 +1909,8 @@ __all__ = [
     "AuditVerificationResultDict",
     "LedgerRecordDict",
     "LedgerVerificationResultDict",
+    "AuditAttestationSummaryDict",
+    "AuditAttestationVerificationResultDict",
     "iter_session",
     "tail_session",
     "verify_log",
@@ -1413,9 +1918,14 @@ __all__ = [
     "verify_inclusion_proof",
     "build_ledger_record",
     "compute_session_digest",
+    "dsse_pae",
     "iter_ledger",
+    "sign_audit_attestation_bundle",
     "validate_ledger_session_id",
+    "verify_audit_attestation",
+    "verify_audit_attestation_bundle",
     "verify_session_in_ledger",
+    "write_audit_attestation",
     # Event payload types
     "ApprovalDecision",
     "AuditEntryPayload",
