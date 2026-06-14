@@ -31,6 +31,12 @@ Verification
 - :func:`verify_log` — alpha-scheme integrity check (per-record sequence
   + prev_chain + leaf hash + chain hash; final Merkle root + chain head
   cross-check against an optional stored summary).
+- :func:`build_inclusion_proof` / :func:`verify_inclusion_proof` —
+  Merkle inclusion proofs for individual audit event leaves.
+- :func:`compute_session_digest`, :func:`build_ledger_record`,
+  :func:`iter_ledger`, :func:`verify_session_in_ledger`, and
+  :func:`validate_ledger_session_id` — the append-only cross-session
+  ledger (``ledger.ndjson``), hash-chained per record.
 - :class:`VerificationError` — raised on mismatch.
 
 Construction (Pydantic models + builder primitives)
@@ -58,13 +64,16 @@ import json
 import os
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import (
     IO,
     Annotated,
     Any,
     Literal,
+    TypeAlias,
+    TypedDict,
+    cast,
 )
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
@@ -76,6 +85,8 @@ _TAIL_READ_CHUNK = 65536
 EVENT_DOMAIN_ALPHA = b"nono.audit.event.alpha\n"
 CHAIN_DOMAIN_ALPHA = b"nono.audit.chain.alpha\n"
 MERKLE_DOMAIN_ALPHA = b"nono.audit.merkle.alpha\n"
+SESSION_DIGEST_DOMAIN_ALPHA = b"nono.audit.session-digest.alpha\n"
+LEDGER_CHAIN_DOMAIN_ALPHA = b"nono.audit.ledger.chain.alpha\n"
 
 HASH_ALGORITHM_ALPHA = "sha256"
 MERKLE_SCHEME_ALPHA = "alpha"
@@ -83,6 +94,7 @@ MERKLE_SCHEME_ALPHA = "alpha"
 PathLike = str | Path
 
 AUDIT_EVENTS_FILENAME = "audit-events.ndjson"
+AUDIT_LEDGER_FILENAME = "ledger.ndjson"
 
 EVENT_TYPES = frozenset(
     {
@@ -219,6 +231,509 @@ def _merkle_root_alpha(leaves: list[bytes]) -> bytes:
     return level[0]
 
 
+HashInput: TypeAlias = str | bytes
+
+
+class AuditProofNodeDict(TypedDict):
+    """JSON shape for one sibling in an alpha audit inclusion proof."""
+
+    direction: Literal["left", "right"]
+    hash: str
+
+
+class AuditInclusionProofDict(TypedDict):
+    """JSON shape returned by :func:`build_inclusion_proof`."""
+
+    leaf_index: int
+    leaf_count: int
+    leaf_hash: str
+    merkle_root: str
+    siblings: list[AuditProofNodeDict]
+
+
+class AuditVerificationResultDict(TypedDict):
+    """JSON shape returned by :func:`verify_log`."""
+
+    hash_algorithm: str
+    merkle_scheme: str
+    event_count: int
+    computed_chain_head: str | None
+    computed_merkle_root: str | None
+    stored_event_count: int | None
+    stored_chain_head: str | None
+    stored_merkle_root: str | None
+    event_count_matches: bool
+    records_verified: bool
+    missing_canonical_event_json: bool
+
+
+class LedgerRecordDict(TypedDict):
+    """JSON shape for one append-only alpha ledger entry."""
+
+    sequence: int
+    prev_chain: str | None
+    session_id: str
+    session_digest: str
+    completed_at: str
+    chain_hash: str
+
+
+class LedgerVerificationResultDict(TypedDict):
+    """JSON shape returned by :func:`verify_session_in_ledger`."""
+
+    hash_algorithm: str
+    entry_count: int
+    session_digest: str
+    session_found: bool
+    session_digest_matches: bool
+    ledger_chain_verified: bool
+    ledger_head: str | None
+
+
+def _hash_input_to_bytes(value: HashInput) -> bytes:
+    if isinstance(value, bytes):
+        if len(value) != 32:
+            raise VerificationError(f"expected 32-byte SHA-256, got {len(value)} bytes")
+        return value
+    return _hex_to_bytes(value)
+
+
+def build_inclusion_proof(
+    leaf_hashes: list[HashInput],
+    leaf_index: int,
+) -> AuditInclusionProofDict:
+    """Build an alpha Merkle inclusion proof for one audit leaf.
+
+    Args:
+        leaf_hashes: Ordered audit leaf hashes as 32-byte values or hex strings.
+        leaf_index: Zero-based index of the leaf to prove.
+
+    Returns:
+        A JSON-serializable proof dict compatible with the Rust core API.
+    """
+    leaves = [_hash_input_to_bytes(value) for value in leaf_hashes]
+    if not leaves:
+        raise VerificationError("cannot build an audit inclusion proof for an empty log")
+    if leaf_index < 0 or leaf_index >= len(leaves):
+        raise VerificationError(
+            f"audit inclusion proof leaf index {leaf_index} is out of range for "
+            f"{len(leaves)} leaves"
+        )
+
+    siblings: list[AuditProofNodeDict] = []
+    index = leaf_index
+    level = list(leaves)
+    while len(level) > 1:
+        sibling_index = index + 1 if index % 2 == 0 else index - 1
+        if sibling_index < len(level):
+            siblings.append(
+                {
+                    "direction": "left" if sibling_index < index else "right",
+                    "hash": level[sibling_index].hex(),
+                }
+            )
+
+        nxt: list[bytes] = []
+        for i in range(0, len(level), 2):
+            left = level[i]
+            if i + 1 == len(level):
+                nxt.append(left)
+                continue
+            h = hashlib.sha256()
+            h.update(MERKLE_DOMAIN_ALPHA)
+            h.update(left)
+            h.update(level[i + 1])
+            nxt.append(h.digest())
+        index //= 2
+        level = nxt
+
+    return {
+        "leaf_index": leaf_index,
+        "leaf_count": len(leaves),
+        "leaf_hash": leaves[leaf_index].hex(),
+        "merkle_root": level[0].hex(),
+        "siblings": siblings,
+    }
+
+
+def verify_inclusion_proof(
+    proof: dict[str, Any],
+    *,
+    expected_root: HashInput | None = None,
+) -> bool:
+    """Verify an alpha Merkle inclusion proof.
+
+    Without ``expected_root``, this checks internal consistency only:
+    every value verified against (``leaf_hash``, ``leaf_count``,
+    ``merkle_root``) comes from ``proof`` itself, so ``True`` means
+    "this proof commits this leaf to this root" — not that the root is
+    the real one. Callers must compare ``proof["merkle_root"]`` (and
+    ``leaf_count``) against a trusted integrity summary, or pass the
+    trusted root as ``expected_root`` to have that comparison done here.
+    """
+    try:
+        trusted_root = _hash_input_to_bytes(expected_root) if expected_root is not None else None
+        leaf_count = int(proof["leaf_count"])
+        leaf_index = int(proof["leaf_index"])
+        if leaf_count <= 0 or leaf_index < 0 or leaf_index >= leaf_count:
+            return False
+        computed = _hex_to_bytes(proof["leaf_hash"])
+        merkle_root = _hex_to_bytes(proof["merkle_root"])
+        siblings = iter(proof.get("siblings", []))
+
+        index = leaf_index
+        width = leaf_count
+        while width > 1:
+            if index % 2 == 0:
+                expected_direction = "right" if index + 1 < width else None
+            else:
+                expected_direction = "left"
+
+            if expected_direction is not None:
+                try:
+                    node = next(siblings)
+                except StopIteration:
+                    return False
+                if node.get("direction") != expected_direction:
+                    return False
+                sibling = _hex_to_bytes(node["hash"])
+                h = hashlib.sha256()
+                h.update(MERKLE_DOMAIN_ALPHA)
+                if expected_direction == "left":
+                    h.update(sibling)
+                    h.update(computed)
+                else:
+                    h.update(computed)
+                    h.update(sibling)
+                computed = h.digest()
+
+            index //= 2
+            width = (width + 1) // 2
+
+        try:
+            next(siblings)
+            return False
+        except StopIteration:
+            if trusted_root is not None and computed != trusted_root:
+                return False
+            return computed == merkle_root
+    except (KeyError, TypeError, ValueError, VerificationError):
+        return False
+
+
+def _metadata_to_dict(metadata: Mapping[str, Any] | Any) -> dict[str, Any]:
+    if isinstance(metadata, Mapping):
+        return dict(metadata)
+    to_json = getattr(metadata, "to_json", None)
+    if callable(to_json):
+        return dict(json.loads(to_json()))
+    raise TypeError("metadata must be a mapping or expose to_json()")
+
+
+def _hash_hex(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.hex()
+    return str(value)
+
+
+def _path_bytes(path: Any) -> list[int]:
+    return list(os.fsencode(str(path)))
+
+
+def _executable_identity_payload(identity: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if identity is None:
+        return None
+    return {
+        "resolved_path": _path_bytes(identity["resolved_path"]),
+        "sha256": _hash_hex(identity["sha256"]),
+    }
+
+
+def _audit_integrity_payload(summary: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if summary is None:
+        return None
+    return {
+        "hash_algorithm": summary["hash_algorithm"],
+        "event_count": summary["event_count"],
+        "chain_head": _hash_hex(summary["chain_head"]),
+        "merkle_root": _hash_hex(summary["merkle_root"]),
+    }
+
+
+def _audit_attestation_payload(summary: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if summary is None:
+        return None
+    return {
+        "predicate_type": summary["predicate_type"],
+        "key_id": summary["key_id"],
+        "public_key": summary["public_key"],
+        "bundle_filename": summary["bundle_filename"],
+    }
+
+
+def _network_event_payload(event: Mapping[str, Any]) -> dict[str, Any]:
+    wire: dict[str, Any] = {
+        "timestamp_unix_ms": event["timestamp_unix_ms"],
+        "mode": event["mode"],
+        "decision": event["decision"],
+    }
+    for key in (
+        "route_id",
+        "auth_mechanism",
+        "auth_outcome",
+        "managed_credential_active",
+        "injection_mode",
+        "denial_category",
+    ):
+        if event.get(key) is not None:
+            wire[key] = event[key]
+    wire.update(
+        {
+            "target": event["target"],
+            "port": event.get("port"),
+            "method": event.get("method"),
+            "path": event.get("path"),
+            "status": event.get("status"),
+            "reason": event.get("reason"),
+        }
+    )
+    return wire
+
+
+# Every field committed by the session digest. All keys must be present in the
+# metadata (None is fine for the optional ones) — silently defaulting a missing
+# protected field would produce a digest that does not cover the real data.
+_SESSION_DIGEST_KEYS = (
+    "session_id",
+    "started",
+    "ended",
+    "command",
+    "executable_identity",
+    "tracked_paths",
+    "snapshot_count",
+    "exit_code",
+    "merkle_roots",
+    "network_events",
+    "audit_event_count",
+    "audit_integrity",
+    "audit_attestation",
+)
+
+
+def _session_digest_payload(metadata: Mapping[str, Any] | Any) -> dict[str, Any]:
+    meta = _metadata_to_dict(metadata)
+    missing = [key for key in _SESSION_DIGEST_KEYS if key not in meta]
+    if missing:
+        raise VerificationError(
+            "session metadata is missing protected digest fields: " + ", ".join(missing)
+        )
+    return {
+        "session_id": meta["session_id"],
+        "started": meta["started"],
+        "ended": meta["ended"],
+        "command": list(meta["command"]),
+        "executable_identity": _executable_identity_payload(meta["executable_identity"]),
+        "tracked_paths": [_path_bytes(path) for path in meta["tracked_paths"]],
+        "snapshot_count": meta["snapshot_count"],
+        "exit_code": meta["exit_code"],
+        "merkle_roots": [_hash_hex(root) for root in meta["merkle_roots"]],
+        "network_events": [_network_event_payload(event) for event in meta["network_events"]],
+        "audit_event_count": meta["audit_event_count"],
+        "audit_integrity": _audit_integrity_payload(meta["audit_integrity"]),
+        "audit_attestation": _audit_attestation_payload(meta["audit_attestation"]),
+    }
+
+
+def compute_session_digest(metadata: Mapping[str, Any] | Any) -> str:
+    """Compute the alpha audit-ledger digest for session metadata.
+
+    Every protected field must be present in ``metadata`` (optional ones may
+    be ``None``); a missing field raises :class:`VerificationError` rather
+    than silently hashing a default value.
+    """
+    payload = _session_digest_payload(metadata)
+    payload_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    h = hashlib.sha256()
+    h.update(SESSION_DIGEST_DOMAIN_ALPHA)
+    h.update(payload_bytes)
+    return h.hexdigest()
+
+
+def _hash_ledger_link(
+    previous: str | None,
+    sequence: int,
+    session_id: str,
+    session_digest: str,
+    completed_at: str,
+) -> str:
+    payload = {
+        "sequence": sequence,
+        "session_id": session_id,
+        "session_digest": session_digest,
+        "completed_at": completed_at,
+    }
+    payload_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    h = hashlib.sha256()
+    h.update(LEDGER_CHAIN_DOMAIN_ALPHA)
+    h.update(_hex_to_bytes(previous) if previous is not None else b"\x00" * 32)
+    h.update(payload_bytes)
+    return h.hexdigest()
+
+
+def validate_ledger_session_id(session_id: str) -> None:
+    valid = (
+        bool(session_id)
+        and len(session_id) <= 64
+        and all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in session_id)
+    )
+    if not valid:
+        raise VerificationError(f"invalid audit session id: {session_id}")
+
+
+def build_ledger_record(
+    metadata: Mapping[str, Any] | Any,
+    *,
+    sequence: int,
+    previous_chain: str | None,
+) -> LedgerRecordDict:
+    """Build one alpha ledger record for `metadata`."""
+    meta = _metadata_to_dict(metadata)
+    session_id = str(meta["session_id"])
+    validate_ledger_session_id(session_id)
+    session_digest = compute_session_digest(meta)
+    completed_at = meta.get("ended") or meta["started"]
+    chain_hash = _hash_ledger_link(
+        previous_chain,
+        sequence,
+        session_id,
+        session_digest,
+        completed_at,
+    )
+    return {
+        "sequence": sequence,
+        "prev_chain": previous_chain,
+        "session_id": session_id,
+        "session_digest": session_digest,
+        "completed_at": completed_at,
+        "chain_hash": chain_hash,
+    }
+
+
+def iter_ledger(ledger_path: PathLike) -> Iterator[LedgerRecordDict]:
+    """Yield parsed records from a ledger NDJSON file.
+
+    Raises:
+        FileNotFoundError: if the ledger file does not exist.
+        json.JSONDecodeError: if a line is malformed (caller may catch).
+    """
+    with Path(ledger_path).open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+_LEDGER_RECORD_KEYS = (
+    "sequence",
+    "prev_chain",
+    "session_id",
+    "session_digest",
+    "completed_at",
+    "chain_hash",
+)
+
+
+def _checked_ledger_records(path: Path) -> Iterator[tuple[int, LedgerRecordDict]]:
+    """Like :func:`iter_ledger`, but malformed records raise VerificationError."""
+    with path.open("r", encoding="utf-8") as fh:
+        for line_number, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise VerificationError(
+                    f"audit ledger record at line {line_number} is not valid JSON"
+                ) from e
+            if not isinstance(record, dict):
+                raise VerificationError(
+                    f"audit ledger record at line {line_number} is not a JSON object"
+                )
+            missing = [key for key in _LEDGER_RECORD_KEYS if key not in record]
+            if missing:
+                raise VerificationError(
+                    f"audit ledger record at line {line_number} is missing fields: "
+                    + ", ".join(missing)
+                )
+            yield line_number, cast(LedgerRecordDict, record)
+
+
+def verify_session_in_ledger(
+    ledger_path: PathLike,
+    metadata: Mapping[str, Any] | Any,
+) -> LedgerVerificationResultDict:
+    """Verify an alpha audit ledger and check whether it contains `metadata`.
+
+    Raises:
+        VerificationError: if a ledger record is malformed or the hash
+            chain does not verify.
+    """
+    path = Path(ledger_path)
+    expected_digest = compute_session_digest(metadata)
+    if not path.exists():
+        return {
+            "hash_algorithm": HASH_ALGORITHM_ALPHA,
+            "entry_count": 0,
+            "session_digest": expected_digest,
+            "session_found": False,
+            "session_digest_matches": False,
+            "ledger_chain_verified": False,
+            "ledger_head": None,
+        }
+
+    meta = _metadata_to_dict(metadata)
+    previous_chain: str | None = None
+    entry_count = 0
+    ledger_head: str | None = None
+    session_found = False
+    session_digest_matches = False
+
+    for line_number, record in _checked_ledger_records(path):
+        if record.get("sequence") != entry_count:
+            raise VerificationError(f"audit ledger sequence mismatch at line {line_number}")
+        if record.get("prev_chain") != previous_chain:
+            raise VerificationError(f"audit ledger prev_chain mismatch at line {line_number}")
+        chain_hash = _hash_ledger_link(
+            previous_chain,
+            record["sequence"],
+            record["session_id"],
+            record["session_digest"],
+            record["completed_at"],
+        )
+        if chain_hash != record.get("chain_hash"):
+            raise VerificationError(f"audit ledger chain hash mismatch at line {line_number}")
+
+        if record["session_id"] == meta["session_id"]:
+            session_found = True
+            session_digest_matches = record["session_digest"] == expected_digest
+
+        previous_chain = record["chain_hash"]
+        ledger_head = record["chain_hash"]
+        entry_count += 1
+
+    return {
+        "hash_algorithm": HASH_ALGORITHM_ALPHA,
+        "entry_count": entry_count,
+        "session_digest": expected_digest,
+        "session_found": session_found,
+        "session_digest_matches": session_digest_matches,
+        "ledger_chain_verified": True,
+        "ledger_head": ledger_head,
+    }
+
+
 def _hex_to_bytes(hex_str: str) -> bytes:
     try:
         b = bytes.fromhex(hex_str)
@@ -232,8 +747,8 @@ def _hex_to_bytes(hex_str: str) -> bytes:
 def verify_log(
     session_dir: PathLike,
     *,
-    stored: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    stored: Mapping[str, Any] | None = None,
+) -> AuditVerificationResultDict:
     """Verify the alpha-scheme integrity of a session's audit log.
 
     Walks ``audit-events.ndjson`` line by line, recomputing each
@@ -412,14 +927,14 @@ def verify_log(
 # follow upstream nullability.
 
 
-class _AuditModel(BaseModel):
+class _AuditModel(BaseModel):  # type: ignore[misc, unused-ignore]
     """Strict Pydantic base for audit payloads shared with the Rust wire format."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     def to_wire(self) -> dict[str, Any]:
         """Return the plain dict shape written to NDJSON and expected by old callers."""
-        return self.model_dump(mode="json")
+        return cast(dict[str, Any], self.model_dump(mode="json"))  # type: ignore[redundant-cast, unused-ignore]
 
 
 HexDigest = Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F]{64}$")]
@@ -472,8 +987,43 @@ class NetworkAuditEventPayload(_AuditModel):
     """Inner shape of a ``network`` event's ``event`` field."""
 
     timestamp_unix_ms: int
-    mode: Literal["connect", "reverse", "external"]
+    mode: Literal["connect", "connect_intercept", "reverse", "external"]
     decision: Literal["allow", "deny"]
+    route_id: str | None = None
+    auth_mechanism: (
+        Literal[
+            "proxy_authorization",
+            "phantom_header",
+            "phantom_path",
+            "phantom_query",
+        ]
+        | None
+    ) = None
+    auth_outcome: Literal["succeeded", "failed"] | None = None
+    managed_credential_active: bool | None = None
+    injection_mode: (
+        Literal[
+            "header",
+            "url_path",
+            "query_param",
+            "basic_auth",
+            "oauth2",
+        ]
+        | None
+    ) = None
+    denial_category: (
+        Literal[
+            "authentication_failed",
+            "endpoint_policy",
+            "managed_credential_unavailable",
+            "host_denied",
+            "intercept_handshake_failed",
+            "upstream_connect_failed",
+            "connect_bypasses_l7",
+            "external_proxy_rejected",
+        ]
+        | None
+    ) = None
     target: str
     port: int | None = None
     method: str | None = None
@@ -481,11 +1031,48 @@ class NetworkAuditEventPayload(_AuditModel):
     status: int | None = None
     reason: str | None = None
 
+    def to_wire(self) -> dict[str, Any]:
+        wire = super().to_wire()
+        for key in (
+            "route_id",
+            "auth_mechanism",
+            "auth_outcome",
+            "managed_credential_active",
+            "injection_mode",
+            "denial_category",
+        ):
+            if wire.get(key) is None:
+                wire.pop(key, None)
+        return wire
+
+
+class ScrubPolicyDiffPayload(_AuditModel):
+    added_flags: list[str] = Field(default_factory=list)
+    removed_flags: list[str] = Field(default_factory=list)
+    added_headers: list[str] = Field(default_factory=list)
+    removed_headers: list[str] = Field(default_factory=list)
+    added_query_keys: list[str] = Field(default_factory=list)
+    removed_query_keys: list[str] = Field(default_factory=list)
+
+    def to_wire(self) -> dict[str, Any]:
+        return {key: value for key, value in super().to_wire().items() if value}
+
 
 class SessionStartedEvent(_AuditModel):
     type: Literal["session_started"]
     started: str
     command: list[str]
+    redaction_policy: ScrubPolicyDiffPayload | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "type": self.type,
+            "started": self.started,
+            "command": list(self.command),
+        }
+        if self.redaction_policy is not None:
+            wire["redaction_policy"] = self.redaction_policy.to_wire()
+        return wire
 
 
 class SessionEndedEvent(_AuditModel):
@@ -510,6 +1097,9 @@ class NetworkEvent(_AuditModel):
     type: Literal["network"]
     event: NetworkAuditEventPayload
 
+    def to_wire(self) -> dict[str, Any]:
+        return {"type": self.type, "event": self.event.to_wire()}
+
 
 AuditEvent = Annotated[
     SessionStartedEvent | SessionEndedEvent | CapabilityDecisionEvent | UrlOpenEvent | NetworkEvent,
@@ -527,6 +1117,16 @@ class AuditEventRecord(_AuditModel):
     event_json: str | None = None
     event: AuditEvent
 
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "prev_chain": self.prev_chain,
+            "leaf_hash": self.leaf_hash,
+            "chain_hash": self.chain_hash,
+            "event_json": self.event_json,
+            "event": self.event.to_wire(),
+        }
+
 
 _AUDIT_EVENT_ADAPTER: TypeAdapter[AuditEvent] = TypeAdapter(AuditEvent)
 _APPROVAL_DECISION_ADAPTER: TypeAdapter[_ApprovalDecisionModelInput] = TypeAdapter(
@@ -535,19 +1135,36 @@ _APPROVAL_DECISION_ADAPTER: TypeAdapter[_ApprovalDecisionModelInput] = TypeAdapt
 
 
 def _validate_event(event: AuditEvent | dict[str, Any]) -> AuditEvent:
-    return _AUDIT_EVENT_ADAPTER.validate_python(event)
+    return cast(  # type: ignore[redundant-cast, unused-ignore]
+        AuditEvent,
+        _AUDIT_EVENT_ADAPTER.validate_python(event),
+    )
 
 
 def _validate_approval_decision(decision: ApprovalDecision) -> _ApprovalDecisionModelInput:
-    return _APPROVAL_DECISION_ADAPTER.validate_python(decision)
+    return cast(  # type: ignore[redundant-cast, unused-ignore]
+        _ApprovalDecisionModelInput,
+        _APPROVAL_DECISION_ADAPTER.validate_python(decision),
+    )
 
 
-def session_started(*, started: str, command: list[str]) -> dict[str, Any]:
+def session_started(
+    *,
+    started: str,
+    command: list[str],
+    redaction_policy: dict[str, Any] | ScrubPolicyDiffPayload | None = None,
+) -> dict[str, Any]:
     """Build a ``session_started`` event payload."""
+    policy = (
+        ScrubPolicyDiffPayload.model_validate(redaction_policy)
+        if isinstance(redaction_policy, dict)
+        else redaction_policy
+    )
     return SessionStartedEvent(
         type="session_started",
         started=started,
         command=list(command),
+        redaction_policy=policy,
     ).to_wire()
 
 
@@ -630,9 +1247,38 @@ def url_open(
 def network(
     *,
     timestamp_unix_ms: int,
-    mode: Literal["connect", "reverse", "external"],
+    mode: Literal["connect", "connect_intercept", "reverse", "external"],
     decision: Literal["allow", "deny"],
     target: str,
+    route_id: str | None = None,
+    auth_mechanism: Literal[
+        "proxy_authorization",
+        "phantom_header",
+        "phantom_path",
+        "phantom_query",
+    ]
+    | None = None,
+    auth_outcome: Literal["succeeded", "failed"] | None = None,
+    managed_credential_active: bool | None = None,
+    injection_mode: Literal[
+        "header",
+        "url_path",
+        "query_param",
+        "basic_auth",
+        "oauth2",
+    ]
+    | None = None,
+    denial_category: Literal[
+        "authentication_failed",
+        "endpoint_policy",
+        "managed_credential_unavailable",
+        "host_denied",
+        "intercept_handshake_failed",
+        "upstream_connect_failed",
+        "connect_bypasses_l7",
+        "external_proxy_rejected",
+    ]
+    | None = None,
     port: int | None = None,
     method: str | None = None,
     path: str | None = None,
@@ -646,6 +1292,12 @@ def network(
             timestamp_unix_ms=timestamp_unix_ms,
             mode=mode,
             decision=decision,
+            route_id=route_id,
+            auth_mechanism=auth_mechanism,
+            auth_outcome=auth_outcome,
+            managed_credential_active=managed_credential_active,
+            injection_mode=injection_mode,
+            denial_category=denial_category,
             target=target,
             port=port,
             method=method,
@@ -739,16 +1391,31 @@ class AlphaRecorder:
 
 __all__ = [
     "AUDIT_EVENTS_FILENAME",
+    "AUDIT_LEDGER_FILENAME",
     "EVENT_TYPES",
     "EVENT_DOMAIN_ALPHA",
     "CHAIN_DOMAIN_ALPHA",
     "MERKLE_DOMAIN_ALPHA",
+    "SESSION_DIGEST_DOMAIN_ALPHA",
+    "LEDGER_CHAIN_DOMAIN_ALPHA",
     "HASH_ALGORITHM_ALPHA",
     "MERKLE_SCHEME_ALPHA",
     "VerificationError",
+    "AuditInclusionProofDict",
+    "AuditProofNodeDict",
+    "AuditVerificationResultDict",
+    "LedgerRecordDict",
+    "LedgerVerificationResultDict",
     "iter_session",
     "tail_session",
     "verify_log",
+    "build_inclusion_proof",
+    "verify_inclusion_proof",
+    "build_ledger_record",
+    "compute_session_digest",
+    "iter_ledger",
+    "validate_ledger_session_id",
+    "verify_session_in_ledger",
     # Event payload types
     "ApprovalDecision",
     "AuditEntryPayload",
@@ -758,6 +1425,7 @@ __all__ = [
     "CapabilityRequestPayload",
     "NetworkAuditEventPayload",
     "NetworkEvent",
+    "ScrubPolicyDiffPayload",
     "SessionEndedEvent",
     "SessionStartedEvent",
     "UrlOpenEvent",

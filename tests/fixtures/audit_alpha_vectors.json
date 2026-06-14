@@ -1,0 +1,66 @@
+{
+  "schema": "nono.audit.alpha.golden-vectors.v1",
+  "source": "nono/crates/nono/src/audit.rs::rust_compatibility_golden_vectors",
+  "session_metadata": {
+    "session_id": "20260421-200000-11111",
+    "started": "2026-04-21T20:00:00Z",
+    "ended": "2026-04-21T20:00:01Z",
+    "command": [
+      "/bin/pwd"
+    ],
+    "executable_identity": null,
+    "tracked_paths": [
+      "/tmp/work"
+    ],
+    "snapshot_count": 0,
+    "exit_code": 0,
+    "merkle_roots": [],
+    "network_events": [],
+    "audit_event_count": 2,
+    "audit_integrity": null,
+    "audit_attestation": null
+  },
+  "ledger": {
+    "sequence": 0,
+    "previous_chain": null,
+    "session_digest": "3a1ed53d426d6ea2544cec6cf6b95ccdc31fda4570d86931239ee0f7d7d39012",
+    "record": {
+      "sequence": 0,
+      "prev_chain": null,
+      "session_id": "20260421-200000-11111",
+      "session_digest": "3a1ed53d426d6ea2544cec6cf6b95ccdc31fda4570d86931239ee0f7d7d39012",
+      "completed_at": "2026-04-21T20:00:01Z",
+      "chain_hash": "8b6dbc155d44df05e6b5e9948fb8fff142222b4b41fb37284fb0d1217000e9bb"
+    }
+  },
+  "inclusion_proof": {
+    "leaf_hashes": [
+      "0101010101010101010101010101010101010101010101010101010101010101",
+      "0202020202020202020202020202020202020202020202020202020202020202",
+      "0303030303030303030303030303030303030303030303030303030303030303",
+      "0404040404040404040404040404040404040404040404040404040404040404",
+      "0505050505050505050505050505050505050505050505050505050505050505"
+    ],
+    "leaf_index": 2,
+    "proof": {
+      "leaf_index": 2,
+      "leaf_count": 5,
+      "leaf_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+      "merkle_root": "87f9319b8dbb3d3fd55d419aabf3c218aafd2dfd82d5e30fb22e8e89c10c0160",
+      "siblings": [
+        {
+          "direction": "right",
+          "hash": "0404040404040404040404040404040404040404040404040404040404040404"
+        },
+        {
+          "direction": "left",
+          "hash": "85fb11ff61817c3aa118af30f054a3ea63c042902722cf8ae35e704fff9624fe"
+        },
+        {
+          "direction": "right",
+          "hash": "0505050505050505050505050505050505050505050505050505050505050505"
+        }
+      ]
+    }
+  }
+}
