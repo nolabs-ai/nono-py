@@ -1,12 +1,12 @@
 """Pytest configuration and fixtures."""
 
 import pytest  # ty:ignore[unresolved-import]  # noqa: F401
-from utils import add_system_paths
+from utils import add_minimal_exec_paths, add_system_paths
 
 from nono_py import AccessMode, CapabilitySet, is_supported, sandboxed_exec
 
 # Re-export so existing tests that do `from conftest import add_system_paths` keep working.
-__all__ = ["add_system_paths"]
+__all__ = ["add_minimal_exec_paths", "add_system_paths"]
 
 
 @pytest.fixture

@@ -321,7 +321,26 @@ class ExecResult:
         """Process exit code (0 = success, -N = killed by signal N)."""
         ...
 
+    def session_diagnostics(self) -> dict[str, object]:
+        """Structured session diagnostic report for this execution."""
+        ...
+
+    def session_diagnostics_json(self) -> str:
+        """JSON session diagnostic report."""
+        ...
+
     def __repr__(self) -> str: ...
+
+def build_session_diagnostic_report(exit_code: int) -> dict[str, object]:
+    """Build a minimal session diagnostic report."""
+    ...
+
+def merge_diagnostic_report_json(
+    session_report_json: str,
+    proxy_diagnostics_json: str | None = None,
+) -> dict[str, object]:
+    """Merge session and proxy diagnostic JSON."""
+    ...
 
 def sandboxed_exec(
     caps: CapabilitySet,
@@ -419,6 +438,23 @@ class InjectMode(Enum):
     def __hash__(self) -> int: ...
     def __eq__(self, other: object) -> bool: ...
 
+class AwsAuthConfig:
+    """AWS SigV4 authentication configuration for a proxy route."""
+
+    def __init__(
+        self,
+        profile: str | None = None,
+        region: str | None = None,
+        service: str | None = None,
+    ) -> None: ...
+    @property
+    def profile(self) -> str | None: ...
+    @property
+    def region(self) -> str | None: ...
+    @property
+    def service(self) -> str | None: ...
+    def __repr__(self) -> str: ...
+
 class RouteConfig:
     """Configuration for a reverse proxy credential injection route."""
 
@@ -438,6 +474,7 @@ class RouteConfig:
         tls_ca: str | None = None,
         tls_client_cert: str | None = None,
         tls_client_key: str | None = None,
+        aws_auth: AwsAuthConfig | None = None,
     ) -> None: ...
     @property
     def prefix(self) -> str: ...
@@ -467,6 +504,8 @@ class RouteConfig:
     def tls_client_cert(self) -> str | None: ...
     @property
     def tls_client_key(self) -> str | None: ...
+    @property
+    def aws_auth(self) -> AwsAuthConfig | None: ...
     def __repr__(self) -> str: ...
 
 class ExternalProxyConfig:
@@ -559,6 +598,14 @@ class ProxyHandle:
 
     def drain_audit_events(self) -> list[NetworkAuditEvent]:
         """Drain and return collected network audit events."""
+        ...
+
+    def diagnostics(self) -> list[dict[str, object]]:
+        """Startup diagnostics from credential loading."""
+        ...
+
+    def diagnostics_json(self) -> str:
+        """Serialize startup diagnostics to JSON."""
         ...
 
     def shutdown(self) -> None:

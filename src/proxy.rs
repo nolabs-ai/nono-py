@@ -7,8 +7,9 @@
 use nono::undo::{NetworkAuditDecision, NetworkAuditMode};
 use nono_proxy::ProxyConfig as RustProxyConfig;
 use nono_proxy::config::{
-    EndpointRule as RustEndpointRule, ExternalProxyConfig as RustExternalProxyConfig,
-    InjectMode as RustInjectMode, RouteConfig as RustRouteConfig,
+    AwsAuthConfig as RustAwsAuthConfig, EndpointRule as RustEndpointRule,
+    ExternalProxyConfig as RustExternalProxyConfig, InjectMode as RustInjectMode,
+    RouteConfig as RustRouteConfig,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -164,6 +165,61 @@ impl From<RustInjectMode> for InjectMode {
 }
 
 // ---------------------------------------------------------------------------
+// AwsAuthConfig
+// ---------------------------------------------------------------------------
+
+/// AWS SigV4 authentication configuration for a proxy route.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+pub struct AwsAuthConfig {
+    inner: RustAwsAuthConfig,
+}
+
+#[pymethods]
+impl AwsAuthConfig {
+    #[new]
+    #[pyo3(signature = (profile = None, region = None, service = None))]
+    fn new(profile: Option<String>, region: Option<String>, service: Option<String>) -> Self {
+        Self {
+            inner: RustAwsAuthConfig {
+                profile,
+                region,
+                service,
+            },
+        }
+    }
+
+    #[getter]
+    fn profile(&self) -> Option<&str> {
+        self.inner.profile.as_deref()
+    }
+
+    #[getter]
+    fn region(&self) -> Option<&str> {
+        self.inner.region.as_deref()
+    }
+
+    #[getter]
+    fn service(&self) -> Option<&str> {
+        self.inner.service.as_deref()
+    }
+
+    fn __repr__(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref v) = self.inner.profile {
+            parts.push(format!("profile='{v}'"));
+        }
+        if let Some(ref v) = self.inner.region {
+            parts.push(format!("region='{v}'"));
+        }
+        if let Some(ref v) = self.inner.service {
+            parts.push(format!("service='{v}'"));
+        }
+        format!("AwsAuthConfig({})", parts.join(", "))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RouteConfig
 // ---------------------------------------------------------------------------
 
@@ -192,6 +248,7 @@ impl RouteConfig {
         tls_ca = None,
         tls_client_cert = None,
         tls_client_key = None,
+        aws_auth = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -209,6 +266,7 @@ impl RouteConfig {
         tls_ca: Option<String>,
         tls_client_cert: Option<String>,
         tls_client_key: Option<String>,
+        aws_auth: Option<AwsAuthConfig>,
     ) -> Self {
         Self {
             inner: RustRouteConfig {
@@ -231,6 +289,7 @@ impl RouteConfig {
                 tls_ca,
                 tls_client_cert,
                 tls_client_key,
+                aws_auth: aws_auth.map(|a| a.inner),
             },
         }
     }
@@ -307,6 +366,14 @@ impl RouteConfig {
     #[getter]
     fn tls_client_key(&self) -> Option<&str> {
         self.inner.tls_client_key.as_deref()
+    }
+
+    #[getter]
+    fn aws_auth(&self) -> Option<AwsAuthConfig> {
+        self.inner
+            .aws_auth
+            .clone()
+            .map(|inner| AwsAuthConfig { inner })
     }
 
     fn __repr__(&self) -> String {
@@ -425,12 +492,15 @@ impl ProxyConfig {
                 bind_addr: addr,
                 bind_port,
                 allowed_hosts: filter_hosts,
+                strict_filter: false,
                 routes,
                 external_proxy: external_proxy.map(|e| e.inner),
                 max_connections,
                 direct_connect_ports: Vec::new(),
                 intercept_ca_dir: intercept_ca_dir.map(std::path::PathBuf::from),
                 intercept_parent_ca_pems,
+                preloaded_ca: None,
+                ca_validity: None,
             },
             allowed_hosts,
             allow_all_hosts,
@@ -607,6 +677,23 @@ impl ProxyHandle {
             }
             Ok(list.unbind().into_any())
         })
+    }
+
+    /// Startup diagnostics from credential loading (structured facts, not log text).
+    ///
+    /// Returns a list of dicts with stable ``code``, ``severity``, ``route_prefix``,
+    /// and related fields.
+    fn diagnostics(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            crate::diagnostic::proxy_diagnostics_to_py(py, self.handle.diagnostics())
+        })
+    }
+
+    /// Serialize startup diagnostics to JSON.
+    fn diagnostics_json(&self) -> PyResult<String> {
+        self.handle
+            .diagnostics_json()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Signal the proxy to shut down gracefully.
