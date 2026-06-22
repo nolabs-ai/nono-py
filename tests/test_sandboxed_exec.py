@@ -2,11 +2,23 @@
 
 import os
 import sys
+import time
 
 import pytest
 from conftest import add_system_paths
 
 from nono_py import AccessMode, CapabilitySet, ExecResult, sandboxed_exec
+
+
+def process_exists(pid: int) -> bool:
+    """Return True if pid currently exists."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def clear_dangerous_loader_env(monkeypatch):
@@ -232,6 +244,45 @@ class TestSandboxedExec:
         )
         assert result.exit_code == 124  # Standard timeout exit code
 
+    def test_timeout_kills_forked_descendants(self, base_caps, temp_dir):
+        """Timeout kills the sandboxed command's process group."""
+        pid_file = temp_dir / "child-pids.txt"
+
+        started_at = time.monotonic()
+        result = sandboxed_exec(
+            base_caps,
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path\n"
+                    "import subprocess\n"
+                    "children = [subprocess.Popen(['sleep', '60']) for _ in range(2)]\n"
+                    f"Path({str(pid_file)!r}).write_text("
+                    "'\\n'.join(str(child.pid) for child in children) + '\\n')\n"
+                    "for child in children:\n"
+                    "    child.wait()\n"
+                ),
+            ],
+            cwd=str(temp_dir),
+            timeout_secs=0.5,
+        )
+        elapsed = time.monotonic() - started_at
+
+        assert result.exit_code == 124
+        assert elapsed < 5.0
+
+        child_pids = [int(line) for line in pid_file.read_text().splitlines()]
+        assert len(child_pids) == 2
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if all(not process_exists(pid) for pid in child_pids):
+                break
+            time.sleep(0.05)
+
+        assert all(not process_exists(pid) for pid in child_pids)
+
     def test_empty_command_raises(self, base_caps):
         """Empty command list raises ValueError."""
         with pytest.raises(ValueError, match="command must not be empty"):
@@ -245,6 +296,16 @@ class TestSandboxedExec:
                 ["echo", "hello"],
                 cwd=str(temp_dir),
                 timeout_secs=-1.0,
+            )
+
+    def test_zero_max_processes_raises(self, base_caps, temp_dir):
+        """max_processes must be positive."""
+        with pytest.raises(ValueError, match="max_processes must be positive"):
+            sandboxed_exec(
+                base_caps,
+                ["echo", "hello"],
+                cwd=str(temp_dir),
+                max_processes=0,
             )
 
     def test_repeated_calls(self, base_caps, temp_dir):

@@ -114,6 +114,17 @@ def main() -> None:
         )
         print(f"   exit_code: {result.exit_code} (124 = timed out)\n")
 
+        # --- Optional process limit ---
+        print("7. Optional max_processes guard:")
+        print("   max_processes uses RLIMIT_NPROC, which is per real Unix UID.")
+        print("   Use it only when sandboxed commands run as a dedicated UID.")
+        print("   Example for that deployment shape:")
+        print(
+            "   sandboxed_exec(caps, ['python', 'agent.py'], "
+            "cwd=workdir, timeout_secs=30.0, max_processes=64)"
+        )
+        print()
+
         print("All examples completed.")
 
 

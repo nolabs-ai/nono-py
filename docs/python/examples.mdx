@@ -352,6 +352,9 @@ caps.block_network()  # Direct network blocked; proxy provides filtered access
 
 env = proxy.sandbox_env()
 result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
+# If every sandbox runs as a dedicated Unix UID, you can also pass
+# max_processes=N. Do not use it as a per-sandbox process budget on a normal
+# shared user account; RLIMIT_NPROC counts all processes owned by that UID.
 
 # 4. Capture changes and audit trail
 manifest, changes = mgr.create_incremental()

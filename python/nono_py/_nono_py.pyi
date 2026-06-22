@@ -330,6 +330,7 @@ def sandboxed_exec(
     timeout_secs: float | None = None,
     env: list[tuple[str, str]] | None = None,
     inherit_env: bool = False,
+    max_processes: int | None = None,
 ) -> ExecResult:
     """Execute a command in a sandboxed child process.
 
@@ -342,13 +343,18 @@ def sandboxed_exec(
             not inherited unless inherit_env=True.
         inherit_env: If True, inherit the parent environment and apply env as
             overrides. Dynamic-loader environment variables are rejected.
+        max_processes: Optional RLIMIT_NPROC value for the sandboxed child.
+            This limit is enforced per real UID by the OS, not per sandbox
+            process tree, and is only useful when sandboxed executions run as a
+            dedicated Unix user.
 
     Returns:
         ExecResult with stdout, stderr, and exit_code
 
     Raises:
         RuntimeError: If fork fails or command cannot be executed
-        ValueError: If command is empty or timeout is negative
+        ValueError: If command is empty, timeout is negative, or max_processes
+            is zero
     """
     ...
 

@@ -70,6 +70,16 @@ platform support issues.
 python examples/07_error_handling.py
 ```
 
+### 08_sandboxed_exec.py
+
+Run commands in sandboxed child processes while the parent remains unsandboxed.
+Shows output capture, environment injection, timeout handling, repeated calls,
+and the `max_processes` caveat for dedicated-UID deployments.
+
+```bash
+python examples/08_sandboxed_exec.py
+```
+
 ### 09_policy_loading.py
 
 Load a `policy.json` document, resolve named groups into a `CapabilitySet`,
