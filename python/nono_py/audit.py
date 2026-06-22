@@ -1686,17 +1686,11 @@ _APPROVAL_DECISION_ADAPTER: TypeAdapter[_ApprovalDecisionModelInput] = TypeAdapt
 
 
 def _validate_event(event: AuditEvent | dict[str, Any]) -> AuditEvent:
-    return cast(  # type: ignore[redundant-cast, unused-ignore]
-        AuditEvent,
-        _AUDIT_EVENT_ADAPTER.validate_python(event),
-    )
+    return _AUDIT_EVENT_ADAPTER.validate_python(event)
 
 
 def _validate_approval_decision(decision: ApprovalDecision) -> _ApprovalDecisionModelInput:
-    return cast(  # type: ignore[redundant-cast, unused-ignore]
-        _ApprovalDecisionModelInput,
-        _APPROVAL_DECISION_ADAPTER.validate_python(decision),
-    )
+    return _APPROVAL_DECISION_ADAPTER.validate_python(decision)
 
 
 def session_started(

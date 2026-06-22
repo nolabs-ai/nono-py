@@ -14,9 +14,11 @@ use pyo3::exceptions::{
 use pyo3::prelude::*;
 use std::path::Path;
 
+mod diagnostic;
 mod policy;
 mod proxy;
 mod sandboxed_exec;
+mod stderr_observation;
 mod undo;
 
 // ---------------------------------------------------------------------------
@@ -24,21 +26,25 @@ mod undo;
 // ---------------------------------------------------------------------------
 
 fn to_py_err(e: NonoError) -> PyErr {
-    match &e {
-        NonoError::PathNotFound(_) => PyFileNotFoundError::new_err(e.to_string()),
-        NonoError::ExpectedDirectory(_) | NonoError::ExpectedFile(_) => {
-            PyValueError::new_err(e.to_string())
-        }
-        NonoError::PathCanonicalization { .. } => PyOSError::new_err(e.to_string()),
-        NonoError::SandboxInit(_) | NonoError::UnsupportedPlatform(_) => {
-            PyRuntimeError::new_err(e.to_string())
-        }
-        NonoError::BlockedCommand { .. } => PyPermissionError::new_err(e.to_string()),
-        NonoError::ConfigParse(_) | NonoError::ProfileParse(_) => {
-            PyValueError::new_err(e.to_string())
-        }
-        _ => PyRuntimeError::new_err(e.to_string()),
-    }
+    Python::attach(|py| {
+        let py_err = match &e {
+            NonoError::PathNotFound(_) => PyFileNotFoundError::new_err(e.to_string()),
+            NonoError::ExpectedDirectory(_) | NonoError::ExpectedFile(_) => {
+                PyValueError::new_err(e.to_string())
+            }
+            NonoError::PathCanonicalization { .. } => PyOSError::new_err(e.to_string()),
+            NonoError::SandboxInit(_) | NonoError::UnsupportedPlatform(_) => {
+                PyRuntimeError::new_err(e.to_string())
+            }
+            NonoError::BlockedCommand { .. } => PyPermissionError::new_err(e.to_string()),
+            NonoError::ConfigParse(_) | NonoError::ProfileParse(_) => {
+                PyValueError::new_err(e.to_string())
+            }
+            _ => PyRuntimeError::new_err(e.to_string()),
+        };
+        diagnostic::attach_nono_error_diagnostics(py, &py_err, &e);
+        py_err
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +734,7 @@ fn _nono_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sandboxed_exec::ExecResult>()?;
     // Proxy classes
     m.add_class::<proxy::InjectMode>()?;
+    m.add_class::<proxy::AwsAuthConfig>()?;
     m.add_class::<proxy::RouteConfig>()?;
     m.add_class::<proxy::ExternalProxyConfig>()?;
     m.add_class::<proxy::ProxyConfig>()?;
@@ -750,6 +757,14 @@ fn _nono_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(support_info, m)?)?;
     m.add_function(wrap_pyfunction!(sandboxed_exec::sandboxed_exec, m)?)?;
     m.add_function(wrap_pyfunction!(validate_deny_overlaps, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        diagnostic::build_session_diagnostic_report,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        diagnostic::merge_diagnostic_report_json,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(proxy::start_proxy, m)?)?;
     Ok(())
 }
