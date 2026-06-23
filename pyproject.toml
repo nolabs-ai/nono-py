@@ -28,11 +28,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/always-further/nono-py"
+Homepage = "https://github.com/nolabs-ai/nono-py"
 Documentation = "https://docs.nono.sh"
-Repository = "https://github.com/always-further/nono-py"
-Issues = "https://github.com/always-further/nono-py/issues"
-Changelog = "https://github.com/always-further/nono-py/releases"
+Repository = "https://github.com/nolabs-ai/nono-py"
+Issues = "https://github.com/nolabs-ai/nono-py/issues"
+Changelog = "https://github.com/nolabs-ai/nono-py/releases"
 
 [project.optional-dependencies]
 dev = [
