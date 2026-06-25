@@ -12,11 +12,15 @@ use pyo3::prelude::*;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::io::{Read, Result as IoResult};
-use std::os::fd::FromRawFd;
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 /// Result of a sandboxed command execution.
@@ -55,6 +59,7 @@ struct ForkContext {
     env_c: Vec<CString>,
     cwd_c: Option<CString>,
     timeout_secs: Option<f64>,
+    max_processes: Option<u64>,
 }
 
 /// Pipe file descriptors for stdout or stderr.
@@ -96,6 +101,10 @@ struct ProxySupervisor {
 ///         environment is not inherited unless inherit_env=True.
 ///     inherit_env: If True, start from the parent environment and apply env
 ///         as overrides. Dangerous dynamic loader variables are rejected.
+///     max_processes: Optional RLIMIT_NPROC value for the child. This is
+///         enforced by the OS per real UID, not per sandbox process tree, and
+///         is useful only when sandboxed executions run as a dedicated Unix
+///         user.
 ///
 /// Returns:
 ///     ExecResult with stdout, stderr, and exit_code
@@ -103,9 +112,11 @@ struct ProxySupervisor {
 /// Raises:
 ///     RuntimeError: If fork fails, sandbox cannot be applied, or the
 ///         command cannot be executed
-///     ValueError: If the command list is empty or timeout is negative
+///     ValueError: If the command list is empty, timeout is negative, or
+///         max_processes is zero
 #[pyfunction]
-#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None, inherit_env=false))]
+#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None, inherit_env=false, max_processes=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn sandboxed_exec(
     py: Python<'_>,
     caps: &CapabilitySet,
@@ -114,6 +125,7 @@ pub fn sandboxed_exec(
     timeout_secs: Option<f64>,
     env: Option<Vec<(String, String)>>,
     inherit_env: bool,
+    max_processes: Option<u64>,
 ) -> PyResult<ExecResult> {
     if command.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -132,6 +144,14 @@ pub fn sandboxed_exec(
         )));
     }
 
+    if let Some(limit) = max_processes
+        && limit == 0
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_processes must be positive",
+        ));
+    }
+
     // Verify threading before fork on Linux.
     #[cfg(target_os = "linux")]
     {
@@ -147,7 +167,15 @@ pub fn sandboxed_exec(
     }
 
     // Prepare all data before fork (allocation-safe zone)
-    let ctx = prepare_fork_context(&caps.inner, &command, cwd, timeout_secs, env, inherit_env)?;
+    let ctx = prepare_fork_context(
+        &caps.inner,
+        &command,
+        cwd,
+        timeout_secs,
+        env,
+        inherit_env,
+        max_processes,
+    )?;
 
     #[cfg(target_os = "linux")]
     let proxy_supervisor_pair = create_proxy_supervisor_pair(&ctx)?;
@@ -177,6 +205,7 @@ fn prepare_fork_context(
     timeout_secs: Option<f64>,
     env: Option<Vec<(String, String)>>,
     inherit_env: bool,
+    max_processes: Option<u64>,
 ) -> PyResult<ForkContext> {
     let resolved_program = resolve_program(&command[0])?;
     let program_c = CString::new(resolved_program.as_os_str().as_bytes())
@@ -212,6 +241,7 @@ fn prepare_fork_context(
         env_c,
         cwd_c,
         timeout_secs,
+        max_processes,
     })
 }
 
@@ -460,6 +490,11 @@ fn do_fork_sandbox_exec(
         );
     }
 
+    // Put the child in a dedicated process group as early as possible.
+    // The child does the same after fork; doing it from both sides narrows
+    // the race before exec and makes timeout cleanup target the whole group.
+    set_child_process_group(pid);
+
     // === PARENT PROCESS ===
     parent_process(
         pid,
@@ -486,6 +521,11 @@ fn child_process(
         nono::SupervisorSocket,
     )>,
 ) -> ! {
+    // Create a process group rooted at this child before any sandboxed command
+    // can fork descendants. Descendants inherit the group unless they
+    // explicitly create a new session/process group.
+    set_own_process_group();
+
     #[cfg(target_os = "linux")]
     let proxy_child_fd = proxy_supervisor_pair.map(|(_, child_sock)| child_sock.as_raw_fd());
 
@@ -517,6 +557,21 @@ fn child_process(
 
     if let Err(e) = close_untrusted_fds(&keep_fds) {
         let detail = format!("nono: failed to close inherited file descriptors: {}\n", e);
+        let msg = detail.as_bytes();
+        unsafe {
+            libc::write(
+                libc::STDERR_FILENO,
+                msg.as_ptr().cast::<libc::c_void>(),
+                msg.len(),
+            );
+            libc::_exit(126);
+        }
+    }
+
+    if let Some(limit) = ctx.max_processes
+        && let Err(e) = apply_max_processes(limit)
+    {
+        let detail = format!("nono: failed to set max_processes: {}\n", e);
         let msg = detail.as_bytes();
         unsafe {
             libc::write(
@@ -708,6 +763,107 @@ fn open_fd_limit() -> i32 {
     }
 }
 
+fn set_own_process_group() {
+    // SAFETY: setpgid(0, 0) affects only the current child process.
+    unsafe {
+        libc::setpgid(0, 0);
+    }
+}
+
+fn set_child_process_group(child_pid: i32) {
+    // SAFETY: setpgid(child, child) is allowed while the child is still ours
+    // and has not performed an exec that prevents the parent-side update. This
+    // is best-effort; the child also calls setpgid(0, 0), and timeout cleanup
+    // falls back to killing the direct child if group kill fails.
+    unsafe {
+        libc::setpgid(child_pid, child_pid);
+    }
+}
+
+fn apply_max_processes(limit: u64) -> IoResult<()> {
+    #[cfg(target_pointer_width = "64")]
+    let rlim: libc::rlim_t = limit;
+    #[cfg(not(target_pointer_width = "64"))]
+    let rlim: libc::rlim_t = limit.min(libc::rlim_t::MAX as u64) as libc::rlim_t;
+    let limit = libc::rlimit {
+        rlim_cur: rlim,
+        rlim_max: rlim,
+    };
+
+    // SAFETY: setrlimit reads the provided rlimit and changes only this
+    // process's resource limits before exec.
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &limit) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn set_nonblocking(fd: i32) -> IoResult<()> {
+    // SAFETY: fcntl() is safe for a valid fd and does not take ownership.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // SAFETY: fcntl(F_SETFL) updates status flags for this fd.
+    let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn read_pipe_until_eof_or_cancel(fd: i32, cancel: Arc<AtomicBool>) -> IoResult<Vec<u8>> {
+    // SAFETY: This thread owns the read fd passed by the parent.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(buf);
+        }
+
+        match file.read(&mut chunk) {
+            Ok(0) => return Ok(buf),
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(buf);
+                }
+                poll_readable(file.as_raw_fd(), Duration::from_millis(10))?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn poll_readable(fd: i32, timeout: Duration) -> IoResult<()> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    loop {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            revents: 0,
+        };
+        // SAFETY: poll is safe with a valid pointer to one pollfd.
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret >= 0 {
+            return Ok(());
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 /// Parent process: close write ends, read output, wait for child.
 fn parent_process(
     child_pid: i32,
@@ -732,28 +888,28 @@ fn parent_process(
     // Capture read fds before spawning threads (moved into closures)
     let stdout_read = stdout_pipe.read_fd;
     let stderr_read = stderr_pipe.read_fd;
+    set_nonblocking(stdout_read)
+        .map_err(|e| PyRuntimeError::new_err(format!("fcntl(O_NONBLOCK) failed: {}", e)))?;
+    set_nonblocking(stderr_read)
+        .map_err(|e| PyRuntimeError::new_err(format!("fcntl(O_NONBLOCK) failed: {}", e)))?;
+    let cancel_readers = Arc::new(AtomicBool::new(false));
 
     // Spawn reader threads to drain pipes concurrently.
     // Prevents deadlock when child output exceeds pipe buffer.
+    let stdout_cancel = Arc::clone(&cancel_readers);
     let stdout_handle = std::thread::spawn(move || {
-        // SAFETY: We own this fd and it is a valid pipe read end.
-        let mut file = unsafe { std::fs::File::from_raw_fd(stdout_read) };
-        let mut buf = Vec::new();
-        let _ = file.read_to_end(&mut buf);
-        buf
+        read_pipe_until_eof_or_cancel(stdout_read, stdout_cancel).unwrap_or_default()
     });
 
+    let stderr_cancel = Arc::clone(&cancel_readers);
     let stderr_handle = std::thread::spawn(move || {
-        // SAFETY: We own this fd and it is a valid pipe read end.
-        let mut file = unsafe { std::fs::File::from_raw_fd(stderr_read) };
-        let mut buf = Vec::new();
-        let _ = file.read_to_end(&mut buf);
-        buf
+        read_pipe_until_eof_or_cancel(stderr_read, stderr_cancel).unwrap_or_default()
     });
 
     let exit_code = wait_for_child(
         child_pid,
         timeout_secs,
+        &cancel_readers,
         #[cfg(target_os = "linux")]
         proxy_supervisor.as_mut(),
     )?;
@@ -787,6 +943,7 @@ fn create_proxy_supervisor(
 fn wait_for_child(
     child_pid: i32,
     timeout_secs: Option<f64>,
+    cancel_readers: &AtomicBool,
     #[cfg(target_os = "linux")] mut proxy_supervisor: Option<&mut ProxySupervisor>,
 ) -> PyResult<i32> {
     let deadline = timeout_secs.map(|t| Instant::now() + Duration::from_secs_f64(t));
@@ -821,8 +978,9 @@ fn wait_for_child(
             if let Some(dl) = deadline
                 && Instant::now() >= dl
             {
+                cancel_readers.store(true, Ordering::Relaxed);
                 unsafe {
-                    libc::kill(child_pid, libc::SIGKILL);
+                    kill_process_group_or_child(child_pid);
                     libc::waitpid(child_pid, &mut status, 0);
                 }
                 #[cfg(target_os = "linux")]
@@ -848,6 +1006,17 @@ fn wait_for_child(
         return Err(PyRuntimeError::new_err(
             "Child process exited with unexpected status",
         ));
+    }
+}
+
+unsafe fn kill_process_group_or_child(child_pid: i32) {
+    // Negative pid targets the process group whose id is child_pid. If the
+    // process-group setup raced or failed, fall back to the direct child.
+    let group_ret = unsafe { libc::kill(-child_pid, libc::SIGKILL) };
+    if group_ret != 0 {
+        unsafe {
+            libc::kill(child_pid, libc::SIGKILL);
+        }
     }
 }
 

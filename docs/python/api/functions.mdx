@@ -182,6 +182,103 @@ require_sandbox()
 
 ---
 
+## sandboxed_exec
+
+```python
+sandboxed_exec(
+    caps: CapabilitySet,
+    command: list[str],
+    cwd: str | None = None,
+    timeout_secs: float | None = None,
+    env: list[tuple[str, str]] | None = None,
+    inherit_env: bool = False,
+    max_processes: int | None = None,
+) -> ExecResult
+```
+
+Run a command in a sandboxed child process while the Python caller remains
+unsandboxed. The child receives only the capabilities in `caps`.
+
+<ParamField path="caps" type="CapabilitySet" required>
+  Capability set defining the child's permitted filesystem and network access.
+</ParamField>
+
+<ParamField path="command" type="list[str]" required>
+  Program and arguments to execute, for example `["python", "agent.py"]`.
+</ParamField>
+
+<ParamField path="cwd" type="str | None">
+  Working directory for the child process.
+</ParamField>
+
+<ParamField path="timeout_secs" type="float | None">
+  Maximum runtime in seconds. On timeout, `sandboxed_exec()` kills the
+  sandboxed command's process group and returns exit code `124`.
+</ParamField>
+
+<ParamField path="env" type="list[tuple[str, str]] | None">
+  Explicit child environment variables. The parent environment is not inherited
+  unless `inherit_env=True`.
+</ParamField>
+
+<ParamField path="inherit_env" type="bool">
+  If true, inherit the parent environment and apply `env` as overrides.
+  Dynamic-loader environment variables such as `LD_*` and `DYLD_*` are rejected.
+</ParamField>
+
+<ParamField path="max_processes" type="int | None">
+  Optional `RLIMIT_NPROC` value for the child. This is a per-real-UID kernel
+  limit, not a per-sandbox process-tree limit.
+</ParamField>
+
+**Returns:** `ExecResult` with `stdout`, `stderr`, and `exit_code`.
+
+**Raises:**
+- `RuntimeError` - Fork failed, sandbox setup failed, or command could not be executed
+- `ValueError` - Command is empty, timeout is negative, or `max_processes` is zero
+
+### Example
+
+```python
+from nono_py import AccessMode, CapabilitySet, sandboxed_exec
+
+caps = CapabilitySet()
+caps.allow_path("/workspace", AccessMode.READ_WRITE)
+caps.block_network()
+
+result = sandboxed_exec(
+    caps,
+    ["python", "agent.py"],
+    cwd="/workspace",
+    timeout_secs=30.0,
+)
+print(result.exit_code, result.stdout)
+```
+
+### Optional Process Limit
+
+`max_processes` sets `RLIMIT_NPROC` before `exec`. Use it only when sandboxed
+executions run under a dedicated Unix UID. The kernel counts every process
+already owned by that UID, so on a normal shared user account a small value can
+make the sandboxed program's first `fork()` fail with `EAGAIN` instead of
+providing a per-sandbox process budget.
+
+```python
+# Dedicated sandbox UID/container only.
+result = sandboxed_exec(
+    caps,
+    ["python", "agent.py"],
+    cwd="/workspace",
+    timeout_secs=30.0,
+    max_processes=64,
+)
+```
+
+Use cgroup `pids.max`, containers, or microVMs for reliable per-execution fork
+limits.
+
+---
+
 ## start_proxy
 
 ```python
@@ -221,6 +318,8 @@ proxy = start_proxy(config)
 # Inject env vars into sandboxed child
 env = list(proxy.env_vars().items()) + list(proxy.credential_env_vars().items())
 result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
+# Optional for dedicated sandbox UIDs only:
+# result = sandboxed_exec(caps, ["python", "agent.py"], env=env, max_processes=64)
 
 # Collect audit trail and shut down
 events = proxy.drain_audit_events()

@@ -168,6 +168,8 @@ proxy = start_proxy(config)
 # Pass to sandboxed child
 env = proxy.sandbox_env()
 result = sandboxed_exec(caps, ["python", "agent.py"], env=env)
+# Optional for dedicated sandbox UIDs only:
+# result = sandboxed_exec(caps, ["python", "agent.py"], env=env, max_processes=64)
 
 # Review what happened
 for event in proxy.drain_audit_events():

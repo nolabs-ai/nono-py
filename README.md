@@ -91,7 +91,12 @@ and can call this repeatedly with different capabilities:
 caps = CapabilitySet()
 caps.allow_path("/workspace", AccessMode.READ_WRITE)
 caps.block_network()
-result = sandboxed_exec(caps, ["python", "agent.py"], cwd="/workspace", timeout_secs=30.0)
+result = sandboxed_exec(
+    caps,
+    ["python", "agent.py"],
+    cwd="/workspace",
+    timeout_secs=30.0,
+)
 print(result.stdout, result.exit_code)
 ```
 
@@ -99,6 +104,18 @@ print(result.stdout, result.exit_code)
 Pass only the variables the child needs through `env=[("NAME", "value")]`.
 Full parent environment inheritance requires `inherit_env=True`; dynamic-loader
 variables such as `LD_*` and `DYLD_*` are rejected.
+
+On timeout, `sandboxed_exec` kills the sandboxed command's process group so
+ordinary forked descendants are terminated with the direct child.
+
+`sandboxed_exec(..., max_processes=N)` sets `RLIMIT_NPROC` in the child before
+exec. This is only meaningful when sandboxed executions run as a dedicated Unix
+UID, because the kernel counts all processes already owned by that real UID, not
+only processes in the sandbox tree. On a normal shared user account, setting a
+small value such as `8` can make the sandboxed program's first `fork()` fail
+with `EAGAIN` because the user already owns more than eight processes; it does
+not provide a reliable per-sandbox fork limit. Use cgroup `pids.max` or a
+dedicated container/microVM boundary for strong per-execution fork containment.
 
 ### Network Proxy
 
