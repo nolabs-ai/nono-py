@@ -92,7 +92,8 @@ jobs:
     name: Publish to PyPI
     needs: [build-sdist, build-wheels-linux, build-wheels-macos]
     runs-on: ubuntu-latest
-    if: github.repository == 'nolabs-ai/nono-py' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
+    # Reusable calls keep the caller event name (for auto-release, "push").
+    if: github.repository == 'nolabs-ai/nono-py'
     environment:
       name: pypi
       url: https://pypi.org/p/nono-py
