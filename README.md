@@ -6,8 +6,8 @@
   <a href="https://opensource.org/licenses/Apache-2.0">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"/>
   </a>
-  <a href="https://github.com/always-further/nono-py/actions/workflows/ci.yml">
-    <img src="https://github.com/always-further/nono-py/actions/workflows/ci.yml/badge.svg" alt="CI Status"/>
+  <a href="https://github.com/nolabs-ai/nono-py/actions/workflows/ci.yml">
+    <img src="https://github.com/nolabs-ai/nono-py/actions/workflows/ci.yml/badge.svg" alt="CI Status"/>
   </a>
   <a href="https://docs.nono.sh">
     <img src="https://img.shields.io/badge/Docs-docs.nono.sh-green.svg" alt="Documentation"/>
@@ -23,7 +23,7 @@
 
 # nono-py
 
-Python bindings for [nono](https://github.com/always-further/nono), a capability-based sandboxing library.
+Python bindings for [nono](https://github.com/nolabs-ai/nono), a capability-based sandboxing library.
 
 nono provides OS-enforced sandboxing using Landlock (Linux) and Seatbelt (macOS). Once a sandbox is applied, unauthorized operations are structurally impossible.
 

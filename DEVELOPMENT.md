@@ -87,8 +87,8 @@ nono-proxy = "0.55.0"
 
 ```bash
 cd ~/dev
-git clone https://github.com/always-further/nono.git
-git clone https://github.com/always-further/nono-py.git
+git clone https://github.com/nolabs-ai/nono.git
+git clone https://github.com/nolabs-ai/nono-py.git
 ```
 
 ### 2. Install Dependencies

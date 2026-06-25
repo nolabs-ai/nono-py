@@ -6,7 +6,7 @@ If you discover a security vulnerability in nono-py, please report it responsibl
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Instead, please [open a GitHub Security Advisory](https://github.com/always-further/nono-py/security/advisories/new) with:
+Instead, please [open a GitHub Security Advisory](https://github.com/nolabs-ai/nono-py/security/advisories/new) with:
 
 - A description of the vulnerability
 - Steps to reproduce the issue

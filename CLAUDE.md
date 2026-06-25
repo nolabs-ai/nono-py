@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-nono-py provides Python bindings for the [nono](https://github.com/always-further/nono) Rust capability-based sandboxing library. It uses PyO3/maturin to expose Rust code to Python, supporting Landlock (Linux) and Seatbelt (macOS).
+nono-py provides Python bindings for the [nono](https://github.com/nolabs-ai/nono) Rust capability-based sandboxing library. It uses PyO3/maturin to expose Rust code to Python, supporting Landlock (Linux) and Seatbelt (macOS).
 
 ## Build & Development Commands
 

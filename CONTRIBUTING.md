@@ -19,7 +19,7 @@ When contributing to nono-py, please first discuss the change you wish to make v
 
 ```bash
 # Clone and set up
-git clone https://github.com/always-further/nono-py.git
+git clone https://github.com/nolabs-ai/nono-py.git
 cd nono-py
 uv sync
 uv run maturin develop
