@@ -253,8 +253,10 @@ class TestPolicyResolution:
         assert resolved.names == ["online"]
         assert not caps.is_network_blocked
 
-    def test_resolve_proxy_network_group_blocks_direct_network(self) -> None:
-        """Proxy-filtered network policies should fail closed until proxy_only is applied."""
+    def test_resolve_proxy_network_group_does_not_block_direct_network(self) -> None:
+        """Proxy-only network policy MUST NOT silently block all network.
+        Proxy-only enforcement is the caller's responsibility via CapabilitySet.proxy_only().
+        Regression test for GHSA-9j7f-3r4p-pwh6 (authorization bypass / policy confusion)."""
         policy = load_policy(
             json.dumps(
                 {
@@ -274,7 +276,34 @@ class TestPolicyResolution:
         resolved = policy.resolve_groups(["proxy_web"], caps)
 
         assert resolved.names == ["proxy_web"]
-        assert caps.is_network_blocked
+        # GHSA-9j7f fix: proxy-only network group should NOT set network_blocked.
+        # The proxy is a separate opt-in via the caller's caps.proxy_only(proxy).
+        assert not caps.is_network_blocked, (
+            "Proxy network group should not silently block all network — "
+            "proxy_only() must be applied separately by the caller"
+        )
+    
+    def test_resolve_network_block_still_blocks_network(self) -> None:
+        """Explicit network.block=True MUST still block network.
+        This was previously tested together with proxy, now separated."""
+        policy = load_policy(
+            json.dumps(
+                {
+                    "groups": {
+                        "offline": {
+                            "description": "Disable outbound network",
+                            "network": {"block": True},
+                        }
+                    }
+                }
+            )
+        )
+
+        caps = CapabilitySet()
+        resolved = policy.resolve_groups(["offline"], caps)
+
+        assert resolved.names == ["offline"]
+        assert caps.is_network_blocked, "Explicit block=true must block network"
 
     def test_resolve_proxy_config_returns_allowed_hosts(self) -> None:
         """Proxy config should resolve allowed hosts from profile-style network JSON."""

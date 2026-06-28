@@ -526,7 +526,7 @@ fn resolve_single_group(
     }
 
     if let Some(network) = &group.network
-        && (network.block || network_requires_proxy(network))
+        && network.block
     {
         caps.inner.set_network_blocked(true);
     }
