@@ -600,7 +600,7 @@ fn child_process(
 
     #[cfg(target_os = "linux")]
     {
-        match Sandbox::apply(&ctx.caps) {
+        match Sandbox::apply_auto(&ctx.caps) {
             Ok(fallback) => {
                 if let Err(e) =
                     install_proxy_fallback_if_needed(&ctx.caps, fallback, proxy_child_fd)
@@ -634,7 +634,7 @@ fn child_process(
 
     #[cfg(not(target_os = "linux"))]
     {
-        if let Err(e) = Sandbox::apply(&ctx.caps) {
+        if let Err(e) = Sandbox::apply_auto(&ctx.caps) {
             let detail = format!("nono: sandbox apply failed: {}\n", e);
             let msg = detail.as_bytes();
             unsafe {
