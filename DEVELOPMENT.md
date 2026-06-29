@@ -286,10 +286,11 @@ uv run mypy python/nono_py --ignore-missing-imports
 
 ## Release Process
 
-1. Update version in `Cargo.toml`, `pyproject.toml`, and `python/nono_py/__init__.py`
-2. Commit changes
-3. Create and push tag: `git tag v0.9.0 && git push --tags`
-4. GitHub Actions will build wheels and publish to PyPI
+See [RELEASE.md](RELEASE.md). In short: open a reviewed PR that bumps the
+version in `pyproject.toml`, `Cargo.toml`, and `python/nono_py/__init__.py`.
+After that PR is merged to `main`, the `Auto-release on version bump` workflow
+publishes to PyPI, then creates the git tag and GitHub release. Do not push
+release tags or create GitHub releases manually for normal releases.
 
 ## Architecture Notes
 
