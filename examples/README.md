@@ -134,6 +134,18 @@ NONO_S3_FAKE=1 NONO_S3_KEY_PREFIX=demo \
   python examples/14_audit_to_s3.py
 ```
 
+### 15_resource_limiting.py
+
+Run a command under a memory ceiling with `nono_py.limited`, which drives the
+`nono` CLI supervisor so the kernel OOM-kills the process tree if it exceeds
+the cap. Shows a run that succeeds under the cap and one that is OOM-killed
+(`result.oom_killed`). Requires the `nono` binary (on `PATH` or via `NONO_BIN`);
+memory enforcement needs Linux with cgroup v2.
+
+```bash
+python examples/15_resource_limiting.py
+```
+
 ## Running Examples
 
 All examples can be run directly:

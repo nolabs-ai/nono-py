@@ -99,6 +99,26 @@ class TestCapsToFlags:
         caps.block_network()
         assert limited.caps_to_flags(caps)[-1] == "--block-net"
 
+    def test_rw_dir_with_comma_raises(self, tmp_path) -> None:
+        # nono's --allow flag splits on commas, so a read+write directory whose
+        # path contains one would be silently mis-granted. Fail loudly instead.
+        comma_dir = tmp_path / "has,comma"
+        comma_dir.mkdir()
+        caps = CapabilitySet()
+        caps.allow_path(str(comma_dir), AccessMode.READ_WRITE)
+        with pytest.raises(ValueError, match="comma"):
+            limited.caps_to_flags(caps)
+
+    def test_read_only_dir_with_comma_is_fine(self, tmp_path) -> None:
+        # Only --allow carries the comma delimiter; --read/--write do not, so a
+        # read-only grant on the same path must not raise.
+        comma_dir = tmp_path / "has,comma"
+        comma_dir.mkdir()
+        caps = CapabilitySet()
+        caps.allow_path(str(comma_dir), AccessMode.READ)
+        resolved = caps.fs_capabilities()[0].resolved
+        assert limited.caps_to_flags(caps) == ["--read", resolved]
+
 
 class TestBuildArgv:
     """Assembly of the full nono run command line."""

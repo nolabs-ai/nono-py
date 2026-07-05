@@ -103,7 +103,7 @@ def find_nono_binary(explicit: str | os.PathLike[str] | None = None) -> str:
     Raises:
         FileNotFoundError: If no usable ``nono`` executable is found.
     """
-    candidate = str(explicit) if explicit is not None else os.environ.get("NONO_BIN")
+    candidate = os.fspath(explicit) if explicit is not None else os.environ.get("NONO_BIN")
     if candidate:
         resolved = shutil.which(candidate)
         if resolved is None:
@@ -122,8 +122,8 @@ def _format_memory(memory: int | str | None) -> str | None:
 
     An ``int`` is treated as a raw byte count; a ``str`` is passed through (e.g.
     ``"512M"``, ``"1Gi"``). ``nono`` performs the authoritative parsing and
-    validation (including its minimum-size rule), so this only rejects values
-    that are obviously malformed.
+    validation (rejecting zero and overflow), so this only rejects values that
+    are obviously malformed.
     """
     if memory is None:
         return None
@@ -146,6 +146,13 @@ def caps_to_flags(caps: CapabilitySet) -> list[str]:
     ``--allow-file``/``--read-file``/``--write-file`` (single files), using each
     grant's canonicalized path. ``block_network()`` maps to ``--block-net``. See
     the module docstring for what is intentionally not translated.
+
+    Raises:
+        ValueError: If a read+write *directory* grant's path contains a comma.
+            The ``nono`` CLI's ``--allow`` flag treats commas as a value
+            separator, so it would split such a path and silently grant the
+            wrong (or no) directory. Rather than mis-grant, we fail loudly.
+            Only ``--allow`` has this delimiter; the other flags are unaffected.
     """
     flags: list[str] = []
     for cap in caps.fs_capabilities():
@@ -162,6 +169,13 @@ def caps_to_flags(caps: CapabilitySet) -> list[str]:
                 flags += ["--read", path]
             elif cap.access == AccessMode.WRITE:
                 flags += ["--write", path]
+            elif "," in path:
+                raise ValueError(
+                    f"cannot grant read+write to a directory whose path contains a "
+                    f"comma via the nono CLI: {path!r}. The --allow flag treats commas "
+                    f"as a value separator and would split the path. Rename the "
+                    f"directory, or grant it read and write separately."
+                )
             else:
                 flags += ["--allow", path]
     if caps.is_network_blocked:
