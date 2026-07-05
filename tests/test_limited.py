@@ -2,8 +2,8 @@
 
 The flag-translation, memory-formatting, argv-building, and binary-discovery
 logic is tested deterministically without needing the ``nono`` binary. The
-end-to-end enforcement tests are skipped unless a ``nono`` binary is present on
-a Linux host with working cgroup v2 delegation.
+end-to-end enforcement tests are skipped unless a ``--memory``-capable ``nono``
+binary is present on a Linux host with working cgroup v2 delegation.
 """
 
 from __future__ import annotations
@@ -185,17 +185,37 @@ class TestFindNonoBinary:
             limited.find_nono_binary()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="cgroup memory limiting is Linux-only")
-def test_end_to_end_run_under_cap(temp_dir) -> None:
-    """A trivial command runs to completion under a generous memory cap.
-
-    Skips if the host can't actually enforce (no cgroup v2 delegation): nono
-    fails closed there, and that failure is about the environment, not the code.
-    """
+def _require_nono() -> None:
+    """Skip if there is no nono binary to drive."""
     try:
         limited.find_nono_binary()
     except FileNotFoundError:
         pytest.skip("nono binary not available in this environment")
+
+
+def _skip_if_cannot_enforce(stderr: str) -> None:
+    """Skip on nono's markers for a host or binary that cannot enforce --memory.
+
+    Fail-closed enforcement errors all carry a literal "resource:" prefix.
+    Matching the bare word would be wrong: nono prints a "resources memory=..."
+    capability banner on stderr for every --memory run, which would turn
+    unrelated failures into skips. Binaries that predate resource limiting
+    reject the flag itself.
+    """
+    if "unexpected argument '--memory'" in stderr:
+        pytest.skip("nono binary predates resource limiting (no --memory flag)")
+    if "resource:" in stderr:
+        pytest.skip(f"resource enforcement unavailable here: {stderr!r}")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="cgroup memory limiting is Linux-only")
+def test_end_to_end_run_under_cap(temp_dir) -> None:
+    """A trivial command runs to completion under a generous memory cap.
+
+    Skips wherever the cap cannot be enforced: nono fails closed there, and
+    that failure is about the environment, not this code.
+    """
+    _require_nono()
 
     caps = CapabilitySet()
     add_system_paths(caps)
@@ -203,15 +223,9 @@ def test_end_to_end_run_under_cap(temp_dir) -> None:
 
     result = limited.run(caps, ["true"], memory="128M", cwd=str(temp_dir), timeout=120)
 
-    # nono's fail-closed resource errors all carry a literal "resource: "
-    # prefix. Matching that (not the bare word "resource") matters: nono's
-    # capability banner prints "resources memory=..." on stderr for every
-    # --memory run, so a looser match would turn unrelated failures into skips.
-    stderr = (result.stderr or "") if isinstance(result.stderr, str) else ""
-    if not result.ok and "unexpected argument '--memory'" in stderr:
-        pytest.skip("nono binary predates resource limiting (no --memory flag)")
-    if not result.ok and "resource:" in stderr:
-        pytest.skip(f"resource enforcement unavailable here: {stderr!r}")
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    if not result.ok:
+        _skip_if_cannot_enforce(stderr)
     assert result.ok, f"expected a clean exit, got returncode={result.returncode} stderr={stderr!r}"
 
 
@@ -219,40 +233,31 @@ def test_end_to_end_run_under_cap(temp_dir) -> None:
 def test_end_to_end_oom_kill_over_cap(temp_dir) -> None:
     """A command that allocates far past its cap is OOM-killed (exit 137).
 
-    Complements test_end_to_end_run_under_cap: that test proves a compliant
-    command is unaffected by its cap; this one proves the cap actually kills.
-    Skips in the same environments — no nono binary, or a host where nono
-    fails closed because it cannot enforce (no cgroup v2 delegation).
+    Counterpart to test_end_to_end_run_under_cap: that test proves a compliant
+    command is unaffected by its cap, this one proves the cap actually kills.
     """
-    try:
-        limited.find_nono_binary()
-    except FileNotFoundError:
-        pytest.skip("nono binary not available in this environment")
+    _require_nono()
 
     caps = CapabilitySet()
     add_system_paths(caps)
     caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
 
-    # bytearray(n) zero-fills, so all 256 MiB get committed rather than lazily
-    # reserved; against a 32M cap (swap disabled by nono) the kernel must kill
-    # the tree. Bounded on purpose: were the cap silently unenforced this exits
-    # 0 and fails below, whereas an unbounded hog would balloon until a
-    # host-level OOM kill forged the expected 137. The timeout only guards a
-    # hung supervisor — the kill itself is near-instant.
+    # bytearray(n) zero-fills, so all 256 MiB really get committed against the
+    # 32M cap (nono disables swap) and the kernel must kill the tree. Bounded
+    # on purpose: were the cap silently unenforced, this exits 0 and fails
+    # below, whereas an unbounded hog would balloon until a host-level OOM
+    # kill forged the expected 137. The timeout only guards a hung supervisor
+    # — the kill itself is near-instant.
     hog = "a = bytearray(256 * 1024 * 1024)"
     result = limited.run(
         caps, [sys.executable, "-c", hog], memory="32M", cwd=str(temp_dir), timeout=120
     )
 
-    # Same skip markers as above, but only consulted when the run was not
-    # OOM-killed: exit 137 already answers the question, and enforcement that
-    # worked must never be reported as unavailable.
-    stderr = (result.stderr or "") if isinstance(result.stderr, str) else ""
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
     if not result.oom_killed and not result.ok:
-        if "unexpected argument '--memory'" in stderr:
-            pytest.skip("nono binary predates resource limiting (no --memory flag)")
-        if "resource:" in stderr:
-            pytest.skip(f"resource enforcement unavailable here: {stderr!r}")
+        # Exit 137 already answers the question; a kill that worked must never
+        # be reported as "enforcement unavailable".
+        _skip_if_cannot_enforce(stderr)
     assert result.oom_killed, (
         f"expected the hog to be OOM-killed (exit {limited.OOM_EXIT_CODE}), got "
         f"returncode={result.returncode} stdout={result.stdout!r} stderr={stderr!r}"

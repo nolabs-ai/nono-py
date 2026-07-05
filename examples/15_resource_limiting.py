@@ -9,7 +9,6 @@ Unlike ``apply()`` (which sandboxes the current process irreversibly), this
 runs the command as a child of the ``nono`` supervisor, so it is safe to run
 repeatedly. It requires the ``nono`` binary on ``PATH`` (or via ``NONO_BIN``),
 and memory enforcement needs Linux with cgroup v2 delegation.
-
 """
 
 import sys

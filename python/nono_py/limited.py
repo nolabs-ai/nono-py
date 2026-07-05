@@ -9,9 +9,7 @@ code lives in the ``nono`` binary and is exercised by its own live cgroup tests.
 Rather than re-implement that security-critical, ``unsafe`` libc machinery in a
 second place, this module *drives* the existing binary: it translates a
 :class:`~nono_py.CapabilitySet` into ``nono run`` flags, adds ``--memory``, and
-runs the command as a child of the supervisor. This mirrors how the nono
-resource-limiting proof-of-concepts (``node-poc``, ``nono-resource-demo``) do
-it — one tested implementation, driven, not copied.
+runs the command as a child of the supervisor.
 
 Example::
 
