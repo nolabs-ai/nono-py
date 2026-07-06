@@ -529,7 +529,7 @@ class NetworkAuditEvent(TypedDict):
 
     timestamp_unix_ms: int
     mode: str  # "connect", "connect_intercept", "reverse", "external"
-    decision: str  # "allow", "deny"
+    decision: str  # "allow", "deny", "approve_requested", "approve_granted", "approve_denied", "approve_timeout", "approve_error"
     target: str
     port: int | None
     method: str | None

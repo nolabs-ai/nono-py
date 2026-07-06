@@ -498,6 +498,11 @@ impl SessionMetadata {
                     {
                         "allow" => NetworkAuditDecision::Allow,
                         "deny" => NetworkAuditDecision::Deny,
+                        "approve_requested" => NetworkAuditDecision::ApproveRequested,
+                        "approve_granted" => NetworkAuditDecision::ApproveGranted,
+                        "approve_denied" => NetworkAuditDecision::ApproveDenied,
+                        "approve_timeout" => NetworkAuditDecision::ApproveTimeout,
+                        "approve_error" => NetworkAuditDecision::ApproveError,
                         other => {
                             return Err(PyValueError::new_err(format!(
                                 "invalid decision: {}",
@@ -611,6 +616,25 @@ impl SessionMetadata {
                             ))),
                         })
                         .transpose()?,
+                    // Fields not round-tripped through the Python dict; the
+                    // proxy populates them but nono-py does not surface them.
+                    upstream: None,
+                    endpoint_policy_action: None,
+                    endpoint_policy_rule: None,
+                    approval_backend: None,
+                    credential_capture_action: None,
+                    credential_capture_name: None,
+                    credential_capture_command: None,
+                    credential_capture_argv: None,
+                    credential_capture_exit_status: None,
+                    credential_capture_duration_ms: None,
+                    credential_capture_stdout_bytes: None,
+                    credential_capture_stderr: None,
+                    credential_capture_cache_scope: None,
+                    credential_capture_output_format: None,
+                    credential_capture_header_names: None,
+                    credential_capture_stdin_mode: None,
+                    credential_capture_interactive: None,
                 });
             }
             self.inner.network_events = rust_events;
