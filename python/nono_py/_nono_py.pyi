@@ -218,6 +218,55 @@ class SupportInfo:
 
     def __repr__(self) -> str: ...
 
+class DetectedAbi:
+    """Detected Landlock ABI version and its feature set (Linux only).
+
+    Obtain one via :func:`detect_abi`; pass it to the ``apply_*_with_abi``
+    variants to skip re-probing the kernel.
+    """
+
+    @property
+    def version(self) -> str:
+        """Landlock ABI version string (e.g. ``"V4"``)."""
+        ...
+
+    @property
+    def has_refer(self) -> bool:
+        """Whether file rename across directories is supported (V2+)."""
+        ...
+
+    @property
+    def has_truncate(self) -> bool:
+        """Whether file truncation control is supported (V3+)."""
+        ...
+
+    @property
+    def has_execute(self) -> bool:
+        """Whether execute access control is supported (V3+)."""
+        ...
+
+    @property
+    def has_network(self) -> bool:
+        """Whether TCP network filtering is supported (V4+)."""
+        ...
+
+    @property
+    def has_ioctl_dev(self) -> bool:
+        """Whether device ioctl filtering is supported (V5+)."""
+        ...
+
+    @property
+    def has_scoping(self) -> bool:
+        """Whether scoped signals and abstract UNIX sockets are supported (V6+)."""
+        ...
+
+    @property
+    def feature_names(self) -> list[str]:
+        """Human-readable feature names available at this ABI level."""
+        ...
+
+    def __repr__(self) -> str: ...
+
 class SandboxState:
     """Serializable snapshot of a CapabilitySet."""
 
@@ -370,6 +419,65 @@ def apply(caps: CapabilitySet) -> None:
     Raises:
         RuntimeError: If the platform is not supported or sandbox initialization fails
     """
+    ...
+
+def detect_abi() -> DetectedAbi:
+    """Detect the Landlock ABI supported by the running kernel (Linux only).
+
+    Returns:
+        A DetectedAbi describing the kernel's Landlock feature set.
+
+    Raises:
+        RuntimeError: On non-Linux platforms, or if Landlock is unavailable.
+    """
+    ...
+
+def apply_landlock(caps: CapabilitySet) -> None:
+    """Apply Landlock-only sandboxing (Linux only). **Irreversible.**
+
+    Unlike :func:`apply`, this errors if network restrictions cannot be
+    satisfied by Landlock alone (kernel ABI < V4).
+
+    Raises:
+        RuntimeError: On non-Linux platforms, or if application fails.
+    """
+    ...
+
+def apply_seccomp(caps: CapabilitySet, external_tcp: bool = False) -> None:
+    """Apply Landlock plus seccomp TCP fallback (Linux only). **Irreversible.**
+
+    Args:
+        caps: The capability set defining permitted operations.
+        external_tcp: When True, declare that TCP enforcement is handled
+            externally instead of by nono's seccomp fallback.
+
+    Raises:
+        RuntimeError: On non-Linux platforms, or if application fails.
+    """
+    ...
+
+def apply_external() -> None:
+    """Declare that TCP network enforcement is handled externally (Linux only).
+
+    A no-op marker; filesystem/process sandboxing is applied separately.
+
+    Raises:
+        RuntimeError: On non-Linux platforms, or if application fails.
+    """
+    ...
+
+def apply_auto_with_abi(caps: CapabilitySet, abi: DetectedAbi) -> None:
+    """Like :func:`apply`, but reuses a pre-detected ABI (Linux only). **Irreversible.**"""
+    ...
+
+def apply_landlock_with_abi(caps: CapabilitySet, abi: DetectedAbi) -> None:
+    """Like :func:`apply_landlock`, but reuses a pre-detected ABI (Linux only). **Irreversible.**"""
+    ...
+
+def apply_seccomp_with_abi(
+    caps: CapabilitySet, abi: DetectedAbi, external_tcp: bool = False
+) -> None:
+    """Like :func:`apply_seccomp`, but reuses a pre-detected ABI (Linux only). **Irreversible.**"""
     ...
 
 def apply_unlink_overrides(caps: CapabilitySet) -> None:
@@ -529,7 +637,7 @@ class NetworkAuditEvent(TypedDict):
 
     timestamp_unix_ms: int
     mode: str  # "connect", "connect_intercept", "reverse", "external"
-    decision: str  # "allow", "deny"
+    decision: str  # "allow", "deny", "approve_requested", "approve_granted", "approve_denied", "approve_timeout", "approve_error"
     target: str
     port: int | None
     method: str | None

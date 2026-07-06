@@ -437,6 +437,76 @@ impl SupportInfo {
 }
 
 // ---------------------------------------------------------------------------
+// DetectedAbi
+// ---------------------------------------------------------------------------
+
+/// Detected Landlock ABI version and the feature set it supports (Linux only).
+///
+/// Obtain one via `detect_abi()`. Pass it to the `apply_*_with_abi` variants
+/// to skip re-probing the kernel on repeated applications.
+#[pyclass(frozen)]
+pub struct DetectedAbi {
+    #[cfg(target_os = "linux")]
+    inner: nono::sandbox::DetectedAbi,
+}
+
+#[cfg(target_os = "linux")]
+#[pymethods]
+impl DetectedAbi {
+    /// Landlock ABI version string (e.g. "V4").
+    #[getter]
+    fn version(&self) -> &'static str {
+        self.inner.version_string()
+    }
+
+    /// Whether file rename across directories is supported (V2+).
+    #[getter]
+    fn has_refer(&self) -> bool {
+        self.inner.has_refer()
+    }
+
+    /// Whether file truncation control is supported (V3+).
+    #[getter]
+    fn has_truncate(&self) -> bool {
+        self.inner.has_truncate()
+    }
+
+    /// Whether execute access control is supported (V3+).
+    #[getter]
+    fn has_execute(&self) -> bool {
+        self.inner.has_execute()
+    }
+
+    /// Whether TCP network filtering is supported (V4+).
+    #[getter]
+    fn has_network(&self) -> bool {
+        self.inner.has_network()
+    }
+
+    /// Whether device ioctl filtering is supported (V5+).
+    #[getter]
+    fn has_ioctl_dev(&self) -> bool {
+        self.inner.has_ioctl_dev()
+    }
+
+    /// Whether scoped signals and abstract UNIX sockets are supported (V6+).
+    #[getter]
+    fn has_scoping(&self) -> bool {
+        self.inner.has_scoping()
+    }
+
+    /// Human-readable feature names available at this ABI level.
+    #[getter]
+    fn feature_names(&self) -> Vec<String> {
+        self.inner.feature_names()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("DetectedAbi(version='{}')", self.inner.version_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SandboxState
 // ---------------------------------------------------------------------------
 
@@ -640,8 +710,171 @@ fn query_result_to_dict(py: Python<'_>, result: &nono::query::QueryResult) -> Py
 ///     RuntimeError: If the platform is not supported or sandbox initialization fails
 #[pyfunction]
 fn apply(caps: &CapabilitySet) -> PyResult<()> {
-    Sandbox::apply(&caps.inner).map_err(to_py_err)?;
+    Sandbox::apply_auto(&caps.inner).map_err(to_py_err)?;
     Ok(())
+}
+
+/// Detect the Landlock ABI supported by the running kernel (Linux only).
+///
+/// Returns:
+///     A DetectedAbi describing the kernel's Landlock feature set.
+///
+/// Raises:
+///     RuntimeError: On non-Linux platforms, or if Landlock is unavailable.
+#[pyfunction]
+fn detect_abi() -> PyResult<DetectedAbi> {
+    #[cfg(target_os = "linux")]
+    {
+        let inner = Sandbox::detect_abi().map_err(to_py_err)?;
+        Ok(DetectedAbi { inner })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(PyRuntimeError::new_err(
+            "detect_abi is only available on Linux",
+        ))
+    }
+}
+
+/// Apply Landlock-only sandboxing (Linux only). **Irreversible.**
+///
+/// Unlike `apply` (which falls back to seccomp), this errors if network
+/// restrictions cannot be satisfied by Landlock alone (kernel ABI < V4).
+///
+/// Raises:
+///     RuntimeError: On non-Linux platforms, or if application fails.
+#[pyfunction]
+fn apply_landlock(caps: &CapabilitySet) -> PyResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        Sandbox::apply_landlock(&caps.inner).map_err(to_py_err)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = caps;
+        Err(PyRuntimeError::new_err(
+            "apply_landlock is only available on Linux",
+        ))
+    }
+}
+
+/// Apply Landlock filesystem/process sandboxing plus seccomp TCP fallback
+/// (Linux only). **Irreversible.**
+///
+/// Args:
+///     caps: The capability set defining permitted operations.
+///     external_tcp: When True, declare that TCP enforcement is handled
+///         externally instead of by nono's seccomp fallback (default False).
+///
+/// Raises:
+///     RuntimeError: On non-Linux platforms, or if application fails.
+#[pyfunction]
+#[pyo3(signature = (caps, external_tcp = false))]
+fn apply_seccomp(caps: &CapabilitySet, external_tcp: bool) -> PyResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let opts = if external_tcp {
+            nono::sandbox::SeccompOpts::external_tcp()
+        } else {
+            nono::sandbox::SeccompOpts::network_fallback()
+        };
+        Sandbox::apply_seccomp(&caps.inner, opts).map_err(to_py_err)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (caps, external_tcp);
+        Err(PyRuntimeError::new_err(
+            "apply_seccomp is only available on Linux",
+        ))
+    }
+}
+
+/// Declare that TCP network enforcement is handled externally (Linux only).
+///
+/// This is a no-op marker; it must not be used as the whole sandbox —
+/// filesystem/process sandboxing is applied separately.
+///
+/// Raises:
+///     RuntimeError: On non-Linux platforms, or if application fails.
+#[pyfunction]
+fn apply_external() -> PyResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        Sandbox::apply_external().map_err(to_py_err)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(PyRuntimeError::new_err(
+            "apply_external is only available on Linux",
+        ))
+    }
+}
+
+/// Apply automatic Landlock → seccomp fallback with a pre-detected ABI
+/// (Linux only). **Irreversible.** See `apply` and `detect_abi`.
+#[pyfunction]
+fn apply_auto_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> PyResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        Sandbox::apply_auto_with_abi(&caps.inner, &abi.inner).map_err(to_py_err)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (caps, abi);
+        Err(PyRuntimeError::new_err(
+            "apply_auto_with_abi is only available on Linux",
+        ))
+    }
+}
+
+/// Apply Landlock-only sandboxing with a pre-detected ABI (Linux only).
+/// **Irreversible.** See `apply_landlock` and `detect_abi`.
+#[pyfunction]
+fn apply_landlock_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> PyResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        Sandbox::apply_landlock_with_abi(&caps.inner, &abi.inner).map_err(to_py_err)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (caps, abi);
+        Err(PyRuntimeError::new_err(
+            "apply_landlock_with_abi is only available on Linux",
+        ))
+    }
+}
+
+/// Apply Landlock + seccomp TCP fallback with a pre-detected ABI (Linux only).
+/// **Irreversible.** See `apply_seccomp` and `detect_abi`.
+#[pyfunction]
+#[pyo3(signature = (caps, abi, external_tcp = false))]
+fn apply_seccomp_with_abi(
+    caps: &CapabilitySet,
+    abi: &DetectedAbi,
+    external_tcp: bool,
+) -> PyResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let opts = if external_tcp {
+            nono::sandbox::SeccompOpts::external_tcp()
+        } else {
+            nono::sandbox::SeccompOpts::network_fallback()
+        };
+        Sandbox::apply_seccomp_with_abi(&caps.inner, &abi.inner, opts).map_err(to_py_err)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (caps, abi, external_tcp);
+        Err(PyRuntimeError::new_err(
+            "apply_seccomp_with_abi is only available on Linux",
+        ))
+    }
 }
 
 /// Check if sandboxing is supported on this platform.
@@ -723,6 +956,7 @@ fn _nono_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<policy::Policy>()?;
     m.add_class::<policy::ResolvedPolicy>()?;
     m.add_class::<SupportInfo>()?;
+    m.add_class::<DetectedAbi>()?;
     m.add_class::<SandboxState>()?;
     m.add_class::<QueryContext>()?;
     m.add_class::<sandboxed_exec::ExecResult>()?;
@@ -742,6 +976,13 @@ fn _nono_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<undo::SnapshotManager>()?;
     // Module functions
     m.add_function(wrap_pyfunction!(apply, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_landlock, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_seccomp, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_external, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_auto_with_abi, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_landlock_with_abi, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_seccomp_with_abi, m)?)?;
+    m.add_function(wrap_pyfunction!(detect_abi, m)?)?;
     m.add_function(wrap_pyfunction!(apply_unlink_overrides, m)?)?;
     m.add_function(wrap_pyfunction!(embedded_policy_json, m)?)?;
     m.add_function(wrap_pyfunction!(is_supported, m)?)?;

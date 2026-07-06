@@ -794,6 +794,8 @@ impl From<PolicyRouteConfig> for RustRouteConfig {
             tls_ca: route.tls_ca,
             tls_client_cert: route.tls_client_cert,
             tls_client_key: route.tls_client_key,
+            endpoint_policy: None,
+            aws_auth: None,
         }
     }
 }
