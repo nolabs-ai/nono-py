@@ -63,6 +63,10 @@ uv run ty check python/                     # Type check (ty)
 
 `python/nono_py/audit.py` provides the audit log reader/writer/verifier: `AlphaRecorder`, `iter_session`, `tail_session`, `verify_log`, and typed event builders. This is a pure-Python module (no Rust), re-exported as `nono_py.audit`.
 
+### Pure-Python Resource-Limiting Module
+
+`python/nono_py/limited.py` runs commands under a resource limit (currently a memory ceiling) by **driving the tested `nono` CLI** rather than reimplementing enforcement: `run(caps, command, memory=...)`, `build_argv`, `caps_to_flags`, `find_nono_binary`, and `RunResult` (`.ok`, `.oom_killed`). It translates a `CapabilitySet` into `nono run` flags, adds `--memory`, and shells out to the CLI supervisor (cgroup v2 enforcement is binary-only, Linux-only, and needs an un-sandboxed parent that in-process `apply()` cannot be). Pure-Python (no Rust), re-exported as `nono_py.limited`. `proxy_only()` is not carried across the subprocess boundary.
+
 ### Nono Dependency
 
 The nono library is pulled from crates.io (`nono = "0.55.0"`, `nono-proxy = "0.55.0"`).

@@ -26,7 +26,7 @@ Functions:
     support_info(): Get platform support details
 """
 
-from nono_py import audit
+from nono_py import audit, limited
 from nono_py._nono_py import (
     AccessMode,
     CapabilitySet,
@@ -75,6 +75,7 @@ __all__ = [
     "FileState",
     "FsCapability",
     "InjectMode",
+    "limited",
     "Policy",
     "ProxyConfig",
     "ProxyHandle",

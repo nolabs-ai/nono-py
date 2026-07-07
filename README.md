@@ -186,6 +186,31 @@ result = verify_log("/path/to/session")
 assert result["records_verified"]
 ```
 
+### Resource Limiting
+
+Run a command under a memory ceiling by driving the tested `nono` CLI. The
+kernel OOM-kills the whole process tree if it exceeds the cap (Linux + cgroup v2):
+
+```python
+from nono_py import AccessMode, CapabilitySet
+from nono_py import limited
+
+caps = CapabilitySet()
+caps.allow_path("/work", AccessMode.READ_WRITE)
+
+result = limited.run(caps, ["python", "hog.py"], memory="512M")
+if result.oom_killed:
+    print("process exceeded its memory cap and was killed")
+elif not result.ok:
+    print(f"failed ({result.returncode}): {result.stderr}")
+```
+
+Enforcement lives in the `nono` binary (found on `PATH`, via `NONO_BIN`, or
+`nono_bin=`), not in-process — memory limits need an un-sandboxed supervisor
+parent, unlike `apply()`. Filesystem grants and `block_network()` are
+translated to CLI flags; `proxy_only()` is not carried across the subprocess
+boundary.
+
 ### Other Classes
 
 - `QueryContext` - Check permissions without applying the sandbox
