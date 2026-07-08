@@ -1514,6 +1514,18 @@ class _ApprovalDeniedPayload(_AuditModel):
 ApprovalDecision = Literal["Granted", "Timeout"] | dict[str, Any]
 _ApprovalDecisionModelInput = Literal["Granted", "Timeout"] | _ApprovalDeniedPayload
 
+# Decision recorded on a proxy network audit event. The "approve_*" values
+# correspond to endpoint-approval outcomes emitted by nono's proxy.
+NetworkDecision: TypeAlias = Literal[
+    "allow",
+    "deny",
+    "approve_requested",
+    "approve_granted",
+    "approve_denied",
+    "approve_timeout",
+    "approve_error",
+]
+
 
 class AuditEntryPayload(_AuditModel):
     """One supervisor capability decision."""
@@ -1539,7 +1551,7 @@ class NetworkAuditEventPayload(_AuditModel):
 
     timestamp_unix_ms: int
     mode: Literal["connect", "connect_intercept", "reverse", "external"]
-    decision: Literal["allow", "deny"]
+    decision: NetworkDecision
     route_id: str | None = None
     auth_mechanism: (
         Literal[
@@ -1686,14 +1698,14 @@ _APPROVAL_DECISION_ADAPTER: TypeAdapter[_ApprovalDecisionModelInput] = TypeAdapt
 
 
 def _validate_event(event: AuditEvent | dict[str, Any]) -> AuditEvent:
-    return cast(  # type: ignore[redundant-cast, unused-ignore]
+    return cast(  # type: ignore[redundant-cast, unused-ignore]  # ty: ignore[redundant-cast]
         AuditEvent,
         _AUDIT_EVENT_ADAPTER.validate_python(event),
     )
 
 
 def _validate_approval_decision(decision: ApprovalDecision) -> _ApprovalDecisionModelInput:
-    return cast(  # type: ignore[redundant-cast, unused-ignore]
+    return cast(  # type: ignore[redundant-cast, unused-ignore]  # ty: ignore[redundant-cast]
         _ApprovalDecisionModelInput,
         _APPROVAL_DECISION_ADAPTER.validate_python(decision),
     )
@@ -1799,7 +1811,7 @@ def network(
     *,
     timestamp_unix_ms: int,
     mode: Literal["connect", "connect_intercept", "reverse", "external"],
-    decision: Literal["allow", "deny"],
+    decision: NetworkDecision,
     target: str,
     route_id: str | None = None,
     auth_mechanism: Literal[

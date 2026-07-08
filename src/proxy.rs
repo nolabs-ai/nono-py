@@ -38,6 +38,11 @@ pub(crate) fn audit_event_to_py_dict<'py>(
         match event.decision {
             NetworkAuditDecision::Allow => "allow",
             NetworkAuditDecision::Deny => "deny",
+            NetworkAuditDecision::ApproveRequested => "approve_requested",
+            NetworkAuditDecision::ApproveGranted => "approve_granted",
+            NetworkAuditDecision::ApproveDenied => "approve_denied",
+            NetworkAuditDecision::ApproveTimeout => "approve_timeout",
+            NetworkAuditDecision::ApproveError => "approve_error",
         },
     )?;
     dict.set_item("target", &event.target)?;
@@ -231,6 +236,8 @@ impl RouteConfig {
                 tls_ca,
                 tls_client_cert,
                 tls_client_key,
+                endpoint_policy: None,
+                aws_auth: None,
             },
         }
     }
@@ -431,6 +438,7 @@ impl ProxyConfig {
                 direct_connect_ports: Vec::new(),
                 intercept_ca_dir: intercept_ca_dir.map(std::path::PathBuf::from),
                 intercept_parent_ca_pems,
+                ..RustProxyConfig::default()
             },
             allowed_hosts,
             allow_all_hosts,
