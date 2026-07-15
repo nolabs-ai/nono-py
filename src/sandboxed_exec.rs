@@ -50,6 +50,39 @@ fn parse_enforcement_mode(mode: &str) -> PyResult<EnforcementMode> {
     }
 }
 
+/// The user/group identity the child should end up with. `None` = leave untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedIds {
+    uid: Option<u32>,
+    gid: Option<u32>,
+}
+
+/// Work out (and sanity-check) the uid/gid the child should drop to. This is
+/// pure policy — no syscalls, no fork, no privilege — so it can be unit-tested
+/// on its own. The rules:
+///
+///   * A uid/gid of 0 is root: "dropping" to it does nothing and would leave the
+///     child fully privileged, so we reject it as almost certainly a mistake.
+///   * If the caller sets a uid but no gid, the gid defaults to the uid. Without
+///     this the child would keep the parent's group (group 0 when the parent is
+///     root), quietly handing back access the uid drop is meant to remove.
+///   * An explicit gid always wins, and if no uid is given the gid is left as-is.
+///
+/// The zero-checks run before the defaulting so `resolve_ids(Some(0), None)` is
+/// rejected rather than turned into `gid = 0`.
+fn resolve_ids(uid: Option<u32>, gid: Option<u32>) -> Result<ResolvedIds, String> {
+    if uid == Some(0) {
+        return Err("uid must be non-zero (0 is root; dropping to it is a no-op)".to_string());
+    }
+    if gid == Some(0) {
+        return Err(
+            "gid must be non-zero (0 is the root group; dropping to it is a no-op)".to_string(),
+        );
+    }
+    let gid = if uid.is_some() { gid.or(uid) } else { gid };
+    Ok(ResolvedIds { uid, gid })
+}
+
 /// Clamp a u64 resource-limit value into the platform's `rlim_t`.
 fn clamp_rlim(value: u64) -> libc::rlim_t {
     #[cfg(target_pointer_width = "64")]
@@ -143,6 +176,8 @@ struct ForkContext {
     max_cpu_seconds: Option<u64>,
     max_file_size_bytes: Option<u64>,
     max_open_files: Option<u64>,
+    uid: Option<u32>,
+    gid: Option<u32>,
     enforcement_mode: EnforcementMode,
 }
 
@@ -200,6 +235,15 @@ struct ProxySupervisor {
 ///         may write to any single file). A write past the limit fails with
 ///         EFBIG and raises SIGXFSZ, which terminates the child if unhandled.
 ///     max_open_files: Optional RLIMIT_NOFILE value (max open file descriptors).
+///     uid: Optional real+effective UID to drop the child to before exec.
+///         Requires the calling process to be privileged (root or CAP_SETUID).
+///         A distinct UID makes the kernel reject the child's kill() against the
+///         same-UID parent with EPERM. Must be non-zero.
+///     gid: Optional real+effective GID to drop the child to before exec. Applied
+///         before uid, and supplementary groups are cleared. Requires privilege.
+///         If uid is set and gid is omitted, gid defaults to uid so the child
+///         does not retain the parent's (possibly privileged) group. Must be
+///         non-zero.
 ///     enforcement_mode: Which OS mechanism to apply: "auto" (default, detect
 ///         best), "landlock", or "seccomp". "landlock"/"seccomp" are Linux-only.
 ///
@@ -210,10 +254,10 @@ struct ProxySupervisor {
 ///     RuntimeError: If fork fails, sandbox cannot be applied, or the
 ///         command cannot be executed
 ///     ValueError: If the command list is empty, timeout is negative,
-///         max_processes/max_cpu_seconds/max_open_files is zero, or
-///         enforcement_mode is invalid
+///         max_processes/max_cpu_seconds/max_open_files is zero, uid/gid is
+///         set on an unsupported platform, or enforcement_mode is invalid
 #[pyfunction]
-#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None, inherit_env=false, max_processes=None, max_cpu_seconds=None, max_file_size_bytes=None, max_open_files=None, enforcement_mode="auto"))]
+#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None, inherit_env=false, max_processes=None, max_cpu_seconds=None, max_file_size_bytes=None, max_open_files=None, uid=None, gid=None, enforcement_mode="auto"))]
 #[allow(clippy::too_many_arguments)]
 pub fn sandboxed_exec(
     py: Python<'_>,
@@ -227,6 +271,8 @@ pub fn sandboxed_exec(
     max_cpu_seconds: Option<u64>,
     max_file_size_bytes: Option<u64>,
     max_open_files: Option<u64>,
+    uid: Option<u32>,
+    gid: Option<u32>,
     enforcement_mode: &str,
 ) -> PyResult<ExecResult> {
     if command.is_empty() {
@@ -268,12 +314,23 @@ pub fn sandboxed_exec(
         ));
     }
 
+    // Validate and resolve the drop identity (pure policy; see resolve_ids).
+    let ResolvedIds { uid, gid } =
+        resolve_ids(uid, gid).map_err(pyo3::exceptions::PyValueError::new_err)?;
+
     let enforcement_mode = parse_enforcement_mode(enforcement_mode)?;
 
     #[cfg(not(target_os = "linux"))]
     if enforcement_mode != EnforcementMode::Auto {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "enforcement_mode 'landlock' and 'seccomp' are only available on Linux",
+        ));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if uid.is_some() || gid.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "uid/gid dropping is only available on Unix platforms other than macOS",
         ));
     }
 
@@ -318,6 +375,8 @@ pub fn sandboxed_exec(
         max_cpu_seconds,
         max_file_size_bytes,
         max_open_files,
+        uid,
+        gid,
         enforcement_mode,
     )?;
 
@@ -354,6 +413,8 @@ fn prepare_fork_context(
     max_cpu_seconds: Option<u64>,
     max_file_size_bytes: Option<u64>,
     max_open_files: Option<u64>,
+    uid: Option<u32>,
+    gid: Option<u32>,
     enforcement_mode: EnforcementMode,
 ) -> PyResult<ForkContext> {
     let resolved_program = resolve_program(&command[0])?;
@@ -394,6 +455,8 @@ fn prepare_fork_context(
         max_cpu_seconds,
         max_file_size_bytes,
         max_open_files,
+        uid,
+        gid,
         enforcement_mode,
     })
 }
@@ -709,16 +772,10 @@ fn child_process(
     let keep_fds: Vec<i32> = Vec::new();
 
     if let Err(e) = close_untrusted_fds(&keep_fds) {
-        let detail = format!("nono: failed to close inherited file descriptors: {}\n", e);
-        let msg = detail.as_bytes();
-        unsafe {
-            libc::write(
-                libc::STDERR_FILENO,
-                msg.as_ptr().cast::<libc::c_void>(),
-                msg.len(),
-            );
-            libc::_exit(126);
-        }
+        child_die(&format!(
+            "nono: failed to close inherited file descriptors: {}\n",
+            e
+        ));
     }
 
     // Apply resource-limit caps (RLIMIT_*) after untrusted fds are closed so the
@@ -729,17 +786,16 @@ fn child_process(
 
     // Change working directory if specified
     if let Some(ref dir) = ctx.cwd_c {
-        unsafe {
-            if libc::chdir(dir.as_ptr()) != 0 {
-                let msg = b"nono: failed to chdir\n";
-                libc::write(
-                    libc::STDERR_FILENO,
-                    msg.as_ptr().cast::<libc::c_void>(),
-                    msg.len(),
-                );
-                libc::_exit(126);
-            }
+        // SAFETY: chdir with a valid NUL-terminated path in the forked child.
+        if unsafe { libc::chdir(dir.as_ptr()) } != 0 {
+            child_die("nono: failed to chdir\n");
         }
+    }
+
+    // Drop to the requested UID/GID after chdir (cwd may need the original
+    // privileges) and before applying the sandbox and exec'ing user code.
+    if let Err(e) = drop_privileges(ctx.uid, ctx.gid) {
+        child_die(&format!("nono: failed to drop privileges: {}\n", e));
     }
 
     #[cfg(target_os = "linux")]
@@ -925,6 +981,88 @@ fn apply_resource_limits(ctx: &ForkContext) -> Result<(), String> {
     }
     if let Some(v) = ctx.max_open_files {
         set_rlimit(libc::RLIMIT_NOFILE, v).map_err(|e| format!("max_open_files: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Hand the child a less-powerful user/group identity before it runs.
+///
+/// The parent may be running as root. We don't want the untrusted command to
+/// inherit that power, so just before exec we switch the child to the requested
+/// user (uid) and group (gid). This only works if the parent is privileged
+/// enough to hand out identities; if it isn't, the switch fails and the child
+/// aborts rather than running with the wrong privileges.
+///
+/// Order matters: drop the group first, then the user. Once you give up the
+/// powerful user you also lose the right to change groups, so doing it the other
+/// way around would leave the group half-changed.
+fn drop_privileges(uid: Option<u32>, gid: Option<u32>) -> Result<(), String> {
+    // Nothing requested — leave the child's identity untouched.
+    if uid.is_none() && gid.is_none() {
+        return Ok(());
+    }
+
+    forget_inherited_groups()?;
+
+    if let Some(gid) = gid {
+        switch_group(gid)?;
+    }
+    if let Some(uid) = uid {
+        switch_user(uid)?;
+    }
+
+    Ok(())
+}
+
+/// Drop every "extra" group the parent belonged to so the child can't ride in
+/// on the parent's group memberships. Must run while still privileged.
+fn forget_inherited_groups() -> Result<(), String> {
+    // SAFETY: setgroups(0, NULL) clears the supplementary group list for this
+    // process only and touches nothing else.
+    if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
+        return Err(format!("setgroups: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Switch the child to group `gid`, then read the identity back to make sure it
+/// actually changed. We don't trust "the call returned success" alone — if the
+/// group didn't fully change we abort instead of running with the wrong group.
+fn switch_group(gid: u32) -> Result<(), String> {
+    // SAFETY: setgid changes only this process's group identity.
+    if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
+        return Err(format!(
+            "setgid({}): {}",
+            gid,
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: getgid/getegid just read the current ids; no side effects.
+    let real = unsafe { libc::getgid() };
+    let effective = unsafe { libc::getegid() };
+    if real != gid as libc::gid_t || effective != gid as libc::gid_t {
+        return Err(format!("setgid({}) did not fully take effect", gid));
+    }
+    Ok(())
+}
+
+/// Switch the child to user `uid`, then read it back to confirm. Same paranoia
+/// as switch_group: a successful-looking call that didn't really drop the user
+/// would leave the child with the parent's power, so we verify and abort if not.
+fn switch_user(uid: u32) -> Result<(), String> {
+    // SAFETY: setuid changes only this process's user identity.
+    if unsafe { libc::setuid(uid as libc::uid_t) } != 0 {
+        return Err(format!(
+            "setuid({}): {}",
+            uid,
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: getuid/geteuid just read the current ids; no side effects.
+    let real = unsafe { libc::getuid() };
+    let effective = unsafe { libc::geteuid() };
+    if real != uid as libc::uid_t || effective != uid as libc::uid_t {
+        return Err(format!("setuid({}) did not fully take effect", uid));
     }
     Ok(())
 }
@@ -1321,4 +1459,97 @@ fn get_thread_count() -> Result<usize, String> {
         }
     }
     Err("Threads field not found in /proc/self/status".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResolvedIds, resolve_ids};
+
+    #[test]
+    fn nothing_requested_is_left_untouched() {
+        assert_eq!(
+            resolve_ids(None, None).unwrap(),
+            ResolvedIds {
+                uid: None,
+                gid: None
+            }
+        );
+    }
+
+    #[test]
+    fn uid_only_defaults_gid_to_uid() {
+        assert_eq!(
+            resolve_ids(Some(1000), None).unwrap(),
+            ResolvedIds {
+                uid: Some(1000),
+                gid: Some(1000)
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_gid_wins_over_default() {
+        assert_eq!(
+            resolve_ids(Some(1000), Some(2000)).unwrap(),
+            ResolvedIds {
+                uid: Some(1000),
+                gid: Some(2000)
+            }
+        );
+    }
+
+    #[test]
+    fn gid_only_leaves_uid_none() {
+        assert_eq!(
+            resolve_ids(None, Some(2000)).unwrap(),
+            ResolvedIds {
+                uid: None,
+                gid: Some(2000)
+            }
+        );
+    }
+
+    #[test]
+    fn matching_uid_gid_pass_through() {
+        assert_eq!(
+            resolve_ids(Some(1000), Some(1000)).unwrap(),
+            ResolvedIds {
+                uid: Some(1000),
+                gid: Some(1000)
+            }
+        );
+    }
+
+    #[test]
+    fn zero_uid_is_rejected() {
+        assert!(
+            resolve_ids(Some(0), None)
+                .unwrap_err()
+                .contains("uid must be non-zero")
+        );
+    }
+
+    #[test]
+    fn zero_gid_is_rejected() {
+        assert!(
+            resolve_ids(Some(1000), Some(0))
+                .unwrap_err()
+                .contains("gid must be non-zero")
+        );
+    }
+
+    #[test]
+    fn zero_gid_alone_is_rejected() {
+        assert!(
+            resolve_ids(None, Some(0))
+                .unwrap_err()
+                .contains("gid must be non-zero")
+        );
+    }
+
+    #[test]
+    fn zero_uid_rejected_before_defaulting() {
+        // Must reject rather than quietly turn into gid = 0.
+        assert!(resolve_ids(Some(0), None).is_err());
+    }
 }
