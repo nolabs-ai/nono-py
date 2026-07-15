@@ -349,12 +349,14 @@ impl CapabilitySet {
     ///       Support is pending a crate seccomp-fallback change. Probe
     ///       ``detect_abi().has_network``.
     ///
-    /// Not serviced under ``proxy_only()`` on the < V4 seccomp path, and not
-    /// preserved across ``SandboxState`` serialization (see SandboxState docs).
+    /// Only TCP is affected — UDP egress is not filtered by Landlock. Not
+    /// serviced under ``proxy_only()`` on the < V4 seccomp path, and not
+    /// preserved across ``SandboxState`` (from_caps raises rather than drop it).
     ///
     /// Args:
     ///     port: The localhost TCP port to allow. Port 0 is a wildcard meaning
-    ///         all localhost outbound on macOS; rejected on Linux with block-net.
+    ///         all localhost outbound on macOS; rejected on Linux with block-net
+    ///         (RuntimeError at apply() time, not when this method is called).
     fn allow_localhost_port(&mut self, port: u16) {
         self.inner.add_localhost_port(port);
     }
@@ -371,10 +373,11 @@ impl CapabilitySet {
     /// "approved hosts". For host/domain-level filtering use the nono proxy
     /// (``proxy_only()``).
     ///
-    /// Enforcement: Linux Landlock ABI V4+ only; fails closed at apply time on
-    /// older kernels (see ``allow_localhost_port``). Not available on macOS —
-    /// raises RuntimeError at apply()/sandboxed_exec() time, not when this
-    /// method is called. Not preserved across ``SandboxState``.
+    /// Only TCP is affected — UDP egress is not filtered by Landlock. Enforcement:
+    /// Linux Landlock ABI V4+ only; fails closed at apply time on older kernels
+    /// (see ``allow_localhost_port``). Not available on macOS — raises
+    /// RuntimeError at apply()/sandboxed_exec() time, not when this method is
+    /// called. Not preserved across ``SandboxState`` (from_caps raises).
     ///
     /// Args:
     ///     port: The TCP port to allow outbound connections to.
@@ -596,11 +599,12 @@ impl DetectedAbi {
 /// **Limitation:** only filesystem grants, unix-socket grants, and the
 /// blocked/allowed network flag are serialized. Per-port TCP allowlists set via
 /// ``allow_localhost_port`` / ``allow_tcp_connect_port`` / ``allow_bind_port``
-/// are NOT preserved: a round-trip drops them. With ``block_network()`` this
-/// makes the restored set *more* restrictive (the allowed ports are lost); with
-/// the default allow-all mode it drops the constraint entirely. Do not use
-/// SandboxState to transfer a capability set that relies on port allowlists
-/// until the underlying crate serializes them (tracked upstream).
+/// cannot be represented, and dropping them silently could widen a restored
+/// sandbox (in the default allow-all mode a connect/bind allowlist becomes fully
+/// open). To keep this fail-closed, ``from_caps`` **raises** ``ValueError`` if
+/// the capability set carries any port allowlist, rather than silently dropping
+/// it. Remove the port rules, or transfer the CapabilitySet without SandboxState,
+/// until the underlying crate serializes the port vectors (tracked upstream).
 ///
 /// Example:
 ///     >>> state = SandboxState.from_caps(caps)
@@ -623,11 +627,29 @@ impl SandboxState {
     ///
     /// Returns:
     ///     A new SandboxState instance
+    ///
+    /// Raises:
+    ///     ValueError: If the capability set carries a per-port TCP allowlist
+    ///         (allow_localhost_port / allow_tcp_connect_port / allow_bind_port).
+    ///         These cannot be serialized, and dropping them silently could widen
+    ///         the restored sandbox, so this fails closed instead.
     #[staticmethod]
-    fn from_caps(caps: &CapabilitySet) -> Self {
-        Self {
-            inner: RustSandboxState::from_caps(&caps.inner),
+    fn from_caps(caps: &CapabilitySet) -> PyResult<Self> {
+        if !caps.inner.tcp_connect_ports().is_empty()
+            || !caps.inner.tcp_bind_ports().is_empty()
+            || !caps.inner.localhost_ports().is_empty()
+        {
+            return Err(PyValueError::new_err(
+                "SandboxState cannot represent per-port TCP allowlists \
+                 (allow_localhost_port / allow_tcp_connect_port / allow_bind_port); \
+                 serializing would silently drop them and could widen the restored \
+                 sandbox. Remove the port rules or transfer the CapabilitySet without \
+                 SandboxState.",
+            ));
         }
+        Ok(Self {
+            inner: RustSandboxState::from_caps(&caps.inner),
+        })
     }
 
     /// Serialize the state to a JSON string.

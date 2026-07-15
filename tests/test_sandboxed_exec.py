@@ -678,6 +678,43 @@ class TestSandboxedExecPortFiltering:
             listener_ok.close()
             listener_blocked.close()
 
+    def test_udp_egress_is_not_blocked(self, base_caps, temp_dir):
+        """KNOWN GAP: Landlock filters TCP only, so UDP egress is NOT blocked by
+        block_network()+allow_bind_port. Pins the current behaviour so a doc/impl
+        claiming "all egress blocked" cannot land unchallenged; update when the
+        crate gains UDP filtering."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            "try:\n"
+            "    s.sendto(b'x', ('1.1.1.1', 53))\n"
+            "    print('UDP_SENT')\n"
+            "except OSError as e:\n"
+            "    print('UDP_BLOCKED', e.errno)\n"
+        )
+        result = sandboxed_exec(
+            base_caps, [sys.executable, "-c", prog], cwd=str(temp_dir), timeout_secs=15.0
+        )
+        assert result.exit_code == 0, result.stderr
+        # Documents today's reality: UDP is not filtered by Landlock.
+        assert result.stdout.strip() == b"UDP_SENT"
+
+    def test_localhost_port_zero_fails_closed(self, base_caps, temp_dir):
+        """The port-0 localhost wildcard is rejected on Linux with block-net:
+        the sandbox fails closed at apply rather than granting a wildcard."""
+        base_caps.block_network()
+        base_caps.allow_localhost_port(0)
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "print('RAN')"],
+            cwd=str(temp_dir),
+            timeout_secs=15.0,
+        )
+        assert result.exit_code != 0
+        assert b"RAN" not in result.stdout
+
 
 @pytest.mark.skipif(
     _landlock_has_network(),
@@ -723,22 +760,28 @@ class TestCapabilitySetPortMethods:
         # summary should render without error
         assert isinstance(caps.summary(), str)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="crate SandboxState does not yet serialize per-port allowlists; "
-        "round-trip drops them (tracked upstream). Remove xfail when fixed.",
+    @pytest.mark.parametrize(
+        "setup",
+        [
+            lambda c: c.allow_localhost_port(5000),
+            lambda c: c.allow_tcp_connect_port(443),
+            lambda c: c.allow_bind_port(8080),
+        ],
     )
-    def test_sandboxstate_preserves_port_rules(self):
-        """Port allowlists should survive SandboxState round-trip.
-
-        Currently they do not (the crate SandboxState omits the port vectors),
-        so this documents the desired behavior and will XPASS-fail loudly once
-        the crate serializes them.
-        """
+    def test_sandboxstate_rejects_port_allowlists(self, setup):
+        """SandboxState cannot serialize per-port allowlists, so from_caps fails
+        closed (raises) rather than silently dropping them — which, in allow-all
+        mode, would widen the restored sandbox to fully open. Guards against that
+        silent widening until the crate serializes the port vectors."""
         caps = CapabilitySet()
         caps.block_network()
-        caps.allow_tcp_connect_port(443)
-        caps.allow_bind_port(8080)
+        setup(caps)
+        with pytest.raises(ValueError, match="per-port TCP allowlist"):
+            SandboxState.from_caps(caps)
+
+    def test_sandboxstate_still_works_without_port_rules(self):
+        """A capability set with no port allowlist round-trips as before."""
+        caps = CapabilitySet()
+        caps.block_network()
         restored = SandboxState.from_json(SandboxState.from_caps(caps).to_json()).to_caps()
-        summary = restored.summary()
-        assert "443" in summary and "8080" in summary
+        assert restored.is_network_blocked

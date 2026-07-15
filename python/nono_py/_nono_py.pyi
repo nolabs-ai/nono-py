@@ -128,7 +128,8 @@ class CapabilitySet:
         any address, not strictly 127.0.0.1. Enforced on Linux Landlock ABI V4+
         (kernel >= 6.7) or macOS; on Linux kernels < 6.7 it is not yet
         enforceable and the sandbox fails closed at apply time (check
-        ``detect_abi().has_network``). Not preserved across SandboxState.
+        ``detect_abi().has_network``). Only TCP — UDP egress is not filtered.
+        Not preserved across SandboxState (from_caps raises rather than drop it).
 
         Args:
             port: The localhost TCP port to allow.
@@ -142,10 +143,10 @@ class CapabilitySet:
         ``block_network()``: only listed ports are reachable, all other outbound
         is blocked. Landlock filters by PORT ONLY, not destination IP — the port
         is reachable on ANY host (incl. the public internet), not only approved
-        hosts; use ``proxy_only()`` for host/domain filtering. Linux Landlock
-        ABI V4+ only; fails closed on older kernels. Not available on macOS
-        (RuntimeError at apply time, not at call time). Not preserved across
-        SandboxState.
+        hosts; use ``proxy_only()`` for host/domain filtering. Only TCP — UDP
+        egress is not filtered. Linux Landlock ABI V4+ only; fails closed on
+        older kernels. Not available on macOS (RuntimeError at apply time, not at
+        call time). Not preserved across SandboxState (from_caps raises).
 
         Args:
             port: The TCP port to allow outbound connections to.
@@ -325,7 +326,14 @@ class SandboxState:
 
     @staticmethod
     def from_caps(caps: CapabilitySet) -> SandboxState:
-        """Create a SandboxState snapshot from a CapabilitySet."""
+        """Create a SandboxState snapshot from a CapabilitySet.
+
+        Raises:
+            ValueError: If the capability set carries a per-port TCP allowlist
+                (allow_localhost_port / allow_tcp_connect_port / allow_bind_port).
+                These cannot be serialized, and dropping them silently could
+                widen the restored sandbox, so this fails closed instead.
+        """
         ...
 
     def to_json(self) -> str:
