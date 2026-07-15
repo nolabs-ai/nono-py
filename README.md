@@ -188,8 +188,15 @@ assert result["records_verified"]
 
 ### Resource Limiting
 
-Run a command under a memory ceiling by driving the tested `nono` CLI. The
-kernel OOM-kills the whole process tree if it exceeds the cap (Linux + cgroup v2):
+Run a command under a memory ceiling and/or a process-count cap by driving the
+tested `nono` CLI (Linux + cgroup v2):
+
+- `memory=` sets `memory.max`: a tree that exceeds it is OOM-killed (exit `137`,
+  surfaced as `result.oom_killed`).
+- `max_processes=` sets `pids.max`: at the cap the kernel refuses new
+  `fork`/`clone` with `EAGAIN`. Nothing is killed — the offending process just
+  fails to spawn — so there is no fixed exit code, only the command's own
+  non-zero status.
 
 ```python
 from nono_py import AccessMode, CapabilitySet
@@ -198,7 +205,7 @@ from nono_py import limited
 caps = CapabilitySet()
 caps.allow_path("/work", AccessMode.READ_WRITE)
 
-result = limited.run(caps, ["python", "hog.py"], memory="512M")
+result = limited.run(caps, ["python", "hog.py"], memory="512M", max_processes=64)
 if result.oom_killed:
     print("process exceeded its memory cap and was killed")
 elif not result.ok:
@@ -206,7 +213,7 @@ elif not result.ok:
 ```
 
 Enforcement lives in the `nono` binary (found on `PATH`, via `NONO_BIN`, or
-`nono_bin=`), not in-process — memory limits need an un-sandboxed supervisor
+`nono_bin=`), not in-process — resource limits need an un-sandboxed supervisor
 parent, unlike `apply()`. Filesystem grants and `block_network()` are
 translated to CLI flags; `proxy_only()` is not carried across the subprocess
 boundary.

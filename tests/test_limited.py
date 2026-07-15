@@ -51,6 +51,38 @@ class TestFormatMemory:
             limited._format_memory(True)
 
 
+class TestFormatMaxProcesses:
+    """Normalization of the max_processes argument into a nono count string."""
+
+    def test_none_is_none(self) -> None:
+        assert limited._format_max_processes(None) is None
+
+    def test_int_is_rendered_as_count(self) -> None:
+        assert limited._format_max_processes(64) == "64"
+
+    def test_one_is_allowed(self) -> None:
+        # 1 is the documented minimum (0 would forbid the sandbox from running).
+        assert limited._format_max_processes(1) == "1"
+
+    def test_zero_raises(self) -> None:
+        with pytest.raises(ValueError):
+            limited._format_max_processes(0)
+
+    def test_negative_raises(self) -> None:
+        with pytest.raises(ValueError):
+            limited._format_max_processes(-1)
+
+    def test_bool_raises(self) -> None:
+        # bool is an int subclass; a True/False process cap is a bug, not 1/0.
+        with pytest.raises(TypeError):
+            limited._format_max_processes(True)
+
+    def test_str_raises(self) -> None:
+        # Unlike --memory there is no size-string form; a count is int-only.
+        with pytest.raises(TypeError):
+            limited._format_max_processes("64")  # type: ignore[arg-type]
+
+
 class TestCapsToFlags:
     """Translation of a CapabilitySet into nono run flags."""
 
@@ -151,6 +183,27 @@ class TestBuildArgv:
         argv = limited.build_argv(self._caps(temp_dir), ["true"], nono_bin=sys.executable)
         assert "--memory" not in argv
 
+    def test_max_processes_flag(self, temp_dir) -> None:
+        argv = limited.build_argv(
+            self._caps(temp_dir), ["true"], max_processes=64, nono_bin=sys.executable
+        )
+        assert argv[argv.index("--max-processes") + 1] == "64"
+
+    def test_no_max_processes_omits_flag(self, temp_dir) -> None:
+        argv = limited.build_argv(self._caps(temp_dir), ["true"], nono_bin=sys.executable)
+        assert "--max-processes" not in argv
+
+    def test_memory_and_max_processes_together(self, temp_dir) -> None:
+        argv = limited.build_argv(
+            self._caps(temp_dir),
+            ["true"],
+            memory="256M",
+            max_processes=32,
+            nono_bin=sys.executable,
+        )
+        assert argv[argv.index("--memory") + 1] == "256M"
+        assert argv[argv.index("--max-processes") + 1] == "32"
+
     def test_empty_command_raises(self, temp_dir) -> None:
         with pytest.raises(ValueError):
             limited.build_argv(self._caps(temp_dir), [], nono_bin=sys.executable)
@@ -158,10 +211,13 @@ class TestBuildArgv:
     def test_flags_precede_separator(self, temp_dir) -> None:
         caps = self._caps(temp_dir)
         caps.block_network()
-        argv = limited.build_argv(caps, ["prog"], memory="64M", nono_bin=sys.executable)
+        argv = limited.build_argv(
+            caps, ["prog"], memory="64M", max_processes=16, nono_bin=sys.executable
+        )
         sep = argv.index("--")
         assert "--block-net" in argv[:sep]
         assert "--memory" in argv[:sep]
+        assert "--max-processes" in argv[:sep]
 
 
 class TestFindNonoBinary:
@@ -194,16 +250,18 @@ def _require_nono() -> None:
 
 
 def _skip_if_cannot_enforce(stderr: str) -> None:
-    """Skip on nono's markers for a host or binary that cannot enforce --memory.
+    """Skip on nono's markers for a host or binary that cannot enforce a limit.
 
     Fail-closed enforcement errors all carry a literal "resource:" prefix.
     Matching the bare word would be wrong: nono prints a "resources memory=..."
-    capability banner on stderr for every --memory run, which would turn
-    unrelated failures into skips. Binaries that predate resource limiting
-    reject the flag itself.
+    capability banner on stderr for every resource-limited run, which would turn
+    unrelated failures into skips. Binaries that predate a given flag reject the
+    flag itself with an "unexpected argument" clap error.
     """
     if "unexpected argument '--memory'" in stderr:
         pytest.skip("nono binary predates resource limiting (no --memory flag)")
+    if "unexpected argument '--max-processes'" in stderr:
+        pytest.skip("nono binary predates the process cap (no --max-processes flag)")
     if "resource:" in stderr:
         pytest.skip(f"resource enforcement unavailable here: {stderr!r}")
 
@@ -261,4 +319,71 @@ def test_end_to_end_oom_kill_over_cap(temp_dir) -> None:
     assert result.oom_killed, (
         f"expected the hog to be OOM-killed (exit {limited.OOM_EXIT_CODE}), got "
         f"returncode={result.returncode} stdout={result.stdout!r} stderr={stderr!r}"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="cgroup pids limiting is Linux-only")
+def test_end_to_end_processes_under_cap(temp_dir) -> None:
+    """A trivial command runs to completion under a generous process cap.
+
+    Counterpart to the over-cap test below: proves a compliant command is
+    unaffected by its --max-processes ceiling, and that a normal interpreter
+    startup fits well under the cap.
+    """
+    _require_nono()
+
+    caps = CapabilitySet()
+    add_system_paths(caps)
+    caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+
+    result = limited.run(caps, ["true"], max_processes=128, cwd=str(temp_dir), timeout=120)
+
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    if not result.ok:
+        _skip_if_cannot_enforce(stderr)
+    assert result.ok, f"expected a clean exit, got returncode={result.returncode} stderr={stderr!r}"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="cgroup pids limiting is Linux-only")
+def test_end_to_end_over_process_cap(temp_dir) -> None:
+    """A command that spawns far past its process cap fails (non-zero exit).
+
+    Unlike the memory OOM path there is no fixed exit code: the kernel refuses
+    the fork/clone with EAGAIN and the program surfaces its own error. Python
+    raises ``RuntimeError: can't start new thread`` and exits non-zero. Daemon
+    threads keep the process from hanging on the ones that did start.
+    """
+    _require_nono()
+
+    caps = CapabilitySet()
+    add_system_paths(caps)
+    caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+
+    # A cap of 32 leaves ample room for interpreter startup but far too little
+    # for 500 threads, so thread creation must hit the pids.max ceiling. Bounded
+    # on purpose: were the cap silently unenforced, all 500 start, the program
+    # exits 0, and the assertion below fails loudly instead of hanging.
+    hog = (
+        "import threading, time\n"
+        "for _ in range(500):\n"
+        "    threading.Thread(target=time.sleep, args=(30,), daemon=True).start()\n"
+    )
+    result = limited.run(
+        caps,
+        [sys.executable, "-c", hog],
+        max_processes=32,
+        cwd=str(temp_dir),
+        timeout=120,
+    )
+
+    # A fail-closed host also exits non-zero, which would forge a pass. Screen
+    # for nono's "resource:" / missing-flag markers first so only a genuine
+    # cap-bite (nono ran, the child hit EAGAIN) reaches the assertion. A clean
+    # run carries only the "resources ..." capability banner, not "resource:",
+    # so it does not skip — it fails the assertion, which is the point.
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    _skip_if_cannot_enforce(stderr)
+    assert not result.ok, (
+        f"expected the thread hog to hit the process cap and exit non-zero, got a "
+        f"clean exit; stdout={result.stdout!r} stderr={stderr!r}"
     )
