@@ -62,27 +62,29 @@ fn clamp_rlim(value: u64) -> libc::rlim_t {
     }
 }
 
+/// `setrlimit`'s resource argument type differs across libc implementations:
+/// `c_uint` on glibc, `c_int` on musl and macOS. This alias lets `set_rlimit`
+/// take the `libc::RLIMIT_*` constants directly, with no cast at the call sites.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::c_uint;
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+type RlimitResource = libc::c_int;
+
 /// Apply a single `setrlimit` cap (soft == hard) before exec.
-///
-/// A macro rather than a function so the resource argument keeps its
-/// platform-specific type (`__rlimit_resource_t` on glibc, `c_int` on macOS)
-/// without a portability shim.
-macro_rules! set_rlimit {
-    ($resource:expr, $value:expr) => {{
-        let rlim = clamp_rlim($value);
-        let limit = libc::rlimit {
-            rlim_cur: rlim,
-            rlim_max: rlim,
-        };
-        // SAFETY: setrlimit reads the provided rlimit and changes only this
-        // process's resource limits before exec.
-        let ret = unsafe { libc::setrlimit($resource, &limit) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }};
+fn set_rlimit(resource: RlimitResource, value: u64) -> IoResult<()> {
+    let rlim = clamp_rlim(value);
+    let limit = libc::rlimit {
+        rlim_cur: rlim,
+        rlim_max: rlim,
+    };
+    // SAFETY: setrlimit reads the provided rlimit and changes only this
+    // process's resource limits before exec.
+    let ret = unsafe { libc::setrlimit(resource, &limit) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 /// Write a diagnostic to stderr and exit the child with code 126. Never returns.
@@ -188,13 +190,15 @@ struct ProxySupervisor {
 ///         is useful only when sandboxed executions run as a dedicated Unix
 ///         user. It is a best-effort cap that a child can escape (e.g. via
 ///         setsid). For a hard, unescapable per-tree process cap use
-///         `nono_py.limited.run(pids=...)` (cgroup v2 pids.max); prefer that
-///         where cgroup v2 delegation is available, and use max_processes for
-///         the in-process path or as a fallback when it is not.
+///         `nono_py.limited.run(max_processes=...)` (cgroup v2 pids.max); prefer
+///         that where cgroup v2 delegation is available, and use max_processes
+///         for the in-process path or as a fallback when it is not.
 ///     max_cpu_seconds: Optional RLIMIT_CPU value (seconds of CPU time). The
-///         kernel sends SIGXCPU when the soft limit is exceeded.
+///         soft and hard limits are set equal, so reaching the cap terminates
+///         the child with SIGKILL (SIGXCPU is not reliably deliverable).
 ///     max_file_size_bytes: Optional RLIMIT_FSIZE value (max bytes the child
-///         may write to any single file). Writes past the limit raise SIGXFSZ.
+///         may write to any single file). A write past the limit fails with
+///         EFBIG and raises SIGXFSZ, which terminates the child if unhandled.
 ///     max_open_files: Optional RLIMIT_NOFILE value (max open file descriptors).
 ///     enforcement_mode: Which OS mechanism to apply: "auto" (default, detect
 ///         best), "landlock", or "seccomp". "landlock"/"seccomp" are Linux-only.
@@ -717,9 +721,8 @@ fn child_process(
         }
     }
 
-    // Apply resource-limit caps (RLIMIT_*) after untrusted fds are closed (so the
-    // NOFILE cap does not truncate the fd-closing sweep) and before dropping
-    // privileges, so the caps bind regardless of the child's final UID.
+    // Apply resource-limit caps (RLIMIT_*) after untrusted fds are closed so the
+    // NOFILE cap does not truncate the fd-closing sweep.
     if let Err(e) = apply_resource_limits(ctx) {
         child_die(&format!("nono: failed to set resource limit ({})\n", e));
     }
@@ -911,17 +914,17 @@ fn set_child_process_group(child_pid: i32) {
 /// propagate a `PyErr` back to the parent).
 fn apply_resource_limits(ctx: &ForkContext) -> Result<(), String> {
     if let Some(v) = ctx.max_cpu_seconds {
-        set_rlimit!(libc::RLIMIT_CPU, v).map_err(|e| format!("max_cpu_seconds: {}", e))?;
+        set_rlimit(libc::RLIMIT_CPU, v).map_err(|e| format!("max_cpu_seconds: {}", e))?;
     }
     if let Some(v) = ctx.max_file_size_bytes {
-        set_rlimit!(libc::RLIMIT_FSIZE, v).map_err(|e| format!("max_file_size_bytes: {}", e))?;
+        set_rlimit(libc::RLIMIT_FSIZE, v).map_err(|e| format!("max_file_size_bytes: {}", e))?;
     }
     // RLIMIT_NPROC is enforced by the OS per real UID, not per sandbox tree.
     if let Some(v) = ctx.max_processes {
-        set_rlimit!(libc::RLIMIT_NPROC, v).map_err(|e| format!("max_processes: {}", e))?;
+        set_rlimit(libc::RLIMIT_NPROC, v).map_err(|e| format!("max_processes: {}", e))?;
     }
     if let Some(v) = ctx.max_open_files {
-        set_rlimit!(libc::RLIMIT_NOFILE, v).map_err(|e| format!("max_open_files: {}", e))?;
+        set_rlimit(libc::RLIMIT_NOFILE, v).map_err(|e| format!("max_open_files: {}", e))?;
     }
     Ok(())
 }

@@ -401,13 +401,15 @@ def sandboxed_exec(
             process tree, and is only useful when sandboxed executions run as a
             dedicated Unix user. It is best-effort and escapable (e.g. via
             setsid). For a hard, unescapable per-tree cap use
-            ``nono_py.limited.run(pids=...)`` (cgroup v2 pids.max); use
+            ``nono_py.limited.run(max_processes=...)`` (cgroup v2 pids.max); use
             max_processes for the in-process path or when cgroup v2 delegation
             is unavailable.
-        max_cpu_seconds: Optional RLIMIT_CPU value (CPU seconds). The kernel
-            sends SIGXCPU when the soft limit is exceeded.
-        max_file_size_bytes: Optional RLIMIT_FSIZE value (max bytes the child
-            may write to any single file). Writes past the limit raise SIGXFSZ.
+        max_cpu_seconds: Optional RLIMIT_CPU value (CPU seconds). Soft and hard
+            limits are set equal, so reaching the cap terminates the child with
+            SIGKILL (SIGXCPU is not reliably deliverable).
+        max_file_size_bytes: Optional RLIMIT_FSIZE value (max bytes the child may
+            write to any single file). A write past the limit fails with EFBIG
+            and raises SIGXFSZ, which terminates the child if unhandled.
         max_open_files: Optional RLIMIT_NOFILE value (max open file descriptors).
         enforcement_mode: OS mechanism to apply: "auto" (default), "landlock",
             or "seccomp". "landlock"/"seccomp" are Linux-only.
