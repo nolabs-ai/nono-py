@@ -67,9 +67,11 @@ uv run ty check python/                     # Type check (ty)
 
 `python/nono_py/limited.py` runs commands under a resource limit (a memory ceiling and/or a process-count cap) by **driving the tested `nono` CLI** rather than reimplementing enforcement: `run(caps, command, memory=..., max_processes=...)`, `build_argv`, `caps_to_flags`, `find_nono_binary`, and `RunResult` (`.ok`, `.oom_killed`). It translates a `CapabilitySet` into `nono run` flags, adds `--memory` / `--max-processes`, and shells out to the CLI supervisor (cgroup v2 enforcement is binary-only, Linux-only, and needs an un-sandboxed parent that in-process `apply()` cannot be). `--memory` maps to `memory.max` (OOM-kill, exit 137 → `.oom_killed`); `--max-processes` maps to `pids.max` (over the cap the kernel refuses forks with `EAGAIN` — nothing is killed, no fixed exit code). Pure-Python (no Rust), re-exported as `nono_py.limited`. `proxy_only()` is not carried across the subprocess boundary.
 
+**Process-cap overlap (deliberate, not redundant):** there are two process-count controls. `limited.run(pids=...)` → cgroup `pids.max` is a **hard, per-tree, unescapable** cap but needs cgroup v2 delegation (fails closed without it, e.g. some ECS/Fargate setups). `sandboxed_exec(max_processes=...)` → `RLIMIT_NPROC` is a **best-effort, per-UID** cap a child can escape (e.g. `setsid`) but works with no cgroup delegation and is the only process cap available on the in-process fork+sandbox path. Prefer the cgroup cap where delegation exists; use `max_processes` for `sandboxed_exec` or as a fallback. The other `sandboxed_exec` rlimits — `max_cpu_seconds` (RLIMIT_CPU), `max_file_size_bytes` (RLIMIT_FSIZE), `max_open_files` (RLIMIT_NOFILE) — have **no cgroup equivalent** and are not superseded by the cgroup work.
+
 ### Nono Dependency
 
-The nono library is pulled from crates.io (`nono = "0.55.0"`, `nono-proxy = "0.55.0"`).
+The nono library is pulled from crates.io (`nono = "0.67.0"`, `nono-proxy = "0.67.0"`).
 
 ## Conventions
 
