@@ -65,7 +65,7 @@ uv run ty check python/                     # Type check (ty)
 
 ### Pure-Python Resource-Limiting Module
 
-`python/nono_py/limited.py` runs commands under a resource limit (currently a memory ceiling) by **driving the tested `nono` CLI** rather than reimplementing enforcement: `run(caps, command, memory=...)`, `build_argv`, `caps_to_flags`, `find_nono_binary`, and `RunResult` (`.ok`, `.oom_killed`). It translates a `CapabilitySet` into `nono run` flags, adds `--memory`, and shells out to the CLI supervisor (cgroup v2 enforcement is binary-only, Linux-only, and needs an un-sandboxed parent that in-process `apply()` cannot be). Pure-Python (no Rust), re-exported as `nono_py.limited`. `proxy_only()` is not carried across the subprocess boundary.
+`python/nono_py/limited.py` runs commands under a resource limit (a memory ceiling and/or a process-count cap) by **driving the tested `nono` CLI** rather than reimplementing enforcement: `run(caps, command, memory=..., max_processes=...)`, `build_argv`, `caps_to_flags`, `find_nono_binary`, and `RunResult` (`.ok`, `.oom_killed`). It translates a `CapabilitySet` into `nono run` flags, adds `--memory` / `--max-processes`, and shells out to the CLI supervisor (cgroup v2 enforcement is binary-only, Linux-only, and needs an un-sandboxed parent that in-process `apply()` cannot be). `--memory` maps to `memory.max` (OOM-kill, exit 137 → `.oom_killed`); `--max-processes` maps to `pids.max` (over the cap the kernel refuses forks with `EAGAIN` — nothing is killed, no fixed exit code). Pure-Python (no Rust), re-exported as `nono_py.limited`. `proxy_only()` is not carried across the subprocess boundary.
 
 ### Nono Dependency
 

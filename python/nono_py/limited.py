@@ -1,15 +1,23 @@
 """Run commands under resource limits by driving the tested ``nono`` CLI.
 
-Resource limiting (currently a memory ceiling) is enforced by the ``nono``
-command-line tool's trusted supervisor, which creates a cgroup v2 leaf on Linux
-(``memory.max`` + ``memory.swap.max=0`` + ``memory.oom.group=1``) and lets the
-kernel OOM-kill the whole process tree if it exceeds the cap. That enforcement
-code lives in the ``nono`` binary and is exercised by its own live cgroup tests.
+Resource limiting (a memory ceiling and/or a process-count cap) is enforced by
+the ``nono`` command-line tool's trusted supervisor, which creates a cgroup v2
+leaf on Linux and lets the kernel police the whole process tree:
+
+- ``--memory`` sets ``memory.max`` (+ ``memory.swap.max=0`` + ``memory.oom.group=1``);
+  a tree that exceeds it is OOM-killed (SIGKILL, exit ``137``).
+- ``--max-processes`` sets ``pids.max``; at the cap the kernel refuses the next
+  ``fork``/``clone`` with ``EAGAIN``. **Nothing is killed** — the offending
+  process just fails to spawn — so there is no fixed exit code, unlike the
+  memory OOM path. The failing command surfaces its own error and status.
+
+That enforcement code lives in the ``nono`` binary and is exercised by its own
+live cgroup tests.
 
 Rather than re-implement that security-critical, ``unsafe`` libc machinery in a
 second place, this module *drives* the existing binary: it translates a
-:class:`~nono_py.CapabilitySet` into ``nono run`` flags, adds ``--memory``, and
-runs the command as a child of the supervisor.
+:class:`~nono_py.CapabilitySet` into ``nono run`` flags, adds ``--memory`` and/or
+``--max-processes``, and runs the command as a child of the supervisor.
 
 Example::
 
@@ -19,17 +27,21 @@ Example::
     caps = CapabilitySet()
     caps.allow_path("/work", AccessMode.READ_WRITE)
 
-    result = limited.run(caps, ["python", "hog.py"], memory="512M")
+    result = limited.run(
+        caps, ["python", "hog.py"], memory="512M", max_processes=64
+    )
     if result.oom_killed:
         print("process exceeded its memory cap and was killed")
+    elif not result.ok:
+        print(f"failed ({result.returncode}): {result.stderr}")
 
 Requirements and limitations:
 
 - The ``nono`` binary must be available at runtime (found on ``PATH``, via the
   ``NONO_BIN`` environment variable, or passed as ``nono_bin=``).
-- Memory enforcement is Linux + cgroup v2 only. On other platforms, or without
+- Resource enforcement is Linux + cgroup v2 only. On other platforms, or without
   cgroup v2 delegation, ``nono`` fails closed and this call returns its non-zero
-  exit and error text rather than running with an unenforced ceiling.
+  exit and error text rather than running with an unenforced limit.
 - Only filesystem grants and ``block_network()`` are translated into CLI flags.
   ``proxy_only()`` network mode is **not** carried: the in-process proxy handle
   cannot cross the subprocess boundary. Use ``block_network()``, or run under a
@@ -137,6 +149,25 @@ def _format_memory(memory: int | str | None) -> str | None:
     return text
 
 
+def _format_max_processes(max_processes: int | None) -> str | None:
+    """Normalize a process-count cap into a ``nono --max-processes`` value.
+
+    The cap is a plain task count (processes + threads), so only an ``int`` is
+    accepted — there is no size-string form as there is for ``--memory``. ``nono``
+    rejects zero (a cap of 0 would forbid the sandbox from running anything), so
+    this requires at least 1 to fail early with a clear message.
+    """
+    if max_processes is None:
+        return None
+    if isinstance(max_processes, bool):  # bool is an int subclass; reject it explicitly
+        raise TypeError("max_processes must be an int count, not bool")
+    if not isinstance(max_processes, int):
+        raise TypeError(f"max_processes must be an int count, got {type(max_processes).__name__}")
+    if max_processes < 1:
+        raise ValueError(f"max_processes must be at least 1, got {max_processes}")
+    return str(max_processes)
+
+
 def caps_to_flags(caps: CapabilitySet) -> list[str]:
     """Translate a :class:`CapabilitySet` into ``nono run`` flags.
 
@@ -186,6 +217,7 @@ def build_argv(
     command: Sequence[str],
     *,
     memory: int | str | None = None,
+    max_processes: int | None = None,
     nono_bin: str | os.PathLike[str] | None = None,
 ) -> list[str]:
     """Build the ``nono run`` argument vector for a resource-limited command.
@@ -194,7 +226,9 @@ def build_argv(
     command line without executing it.
 
     Raises:
-        ValueError: If ``command`` is empty or ``memory`` is malformed.
+        ValueError: If ``command`` is empty, or ``memory`` / ``max_processes``
+            is malformed.
+        TypeError: If ``max_processes`` is not an int count.
         FileNotFoundError: If the ``nono`` binary cannot be located.
     """
     if not command:
@@ -205,6 +239,9 @@ def build_argv(
     mem = _format_memory(memory)
     if mem is not None:
         argv += ["--memory", mem]
+    procs = _format_max_processes(max_processes)
+    if procs is not None:
+        argv += ["--max-processes", procs]
     argv += ["--", *command]
     return argv
 
@@ -214,6 +251,7 @@ def run(
     command: Sequence[str],
     *,
     memory: int | str | None = None,
+    max_processes: int | None = None,
     cwd: str | os.PathLike[str] | None = None,
     timeout: float | None = None,
     env: Mapping[str, str] | None = None,
@@ -228,6 +266,9 @@ def run(
         command: Program and arguments to execute (must be non-empty).
         memory: Memory ceiling as a byte count (int) or size string (e.g.
             ``"512M"``). ``None`` runs sandboxed without a memory cap.
+        max_processes: Maximum number of processes and threads in the tree
+            (``pids.max``). At the cap, new forks are refused with ``EAGAIN``
+            rather than anything being killed. ``None`` runs without a cap.
         cwd: Working directory for the child.
         timeout: Seconds before the run is killed (raises
             :class:`subprocess.TimeoutExpired`).
@@ -242,11 +283,13 @@ def run(
         RunResult: exit status and captured output.
 
     Raises:
-        ValueError: If ``command`` is empty or ``memory`` is malformed.
+        ValueError: If ``command`` is empty, or ``memory`` / ``max_processes``
+            is malformed.
+        TypeError: If ``max_processes`` is not an int count.
         FileNotFoundError: If the ``nono`` binary cannot be located.
         subprocess.TimeoutExpired: If ``timeout`` elapses.
     """
-    argv = build_argv(caps, command, memory=memory, nono_bin=nono_bin)
+    argv = build_argv(caps, command, memory=memory, max_processes=max_processes, nono_bin=nono_bin)
     completed = subprocess.run(  # noqa: S603 - argv is built from caps, not a shell string
         argv,
         cwd=os.fspath(cwd) if cwd is not None else None,

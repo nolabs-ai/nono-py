@@ -136,11 +136,12 @@ NONO_S3_FAKE=1 NONO_S3_KEY_PREFIX=demo \
 
 ### 15_resource_limiting.py
 
-Run a command under a memory ceiling with `nono_py.limited`, which drives the
-`nono` CLI supervisor so the kernel OOM-kills the process tree if it exceeds
-the cap. Shows a run that succeeds under the cap and one that is OOM-killed
-(`result.oom_killed`). Requires the `nono` binary (on `PATH` or via `NONO_BIN`);
-memory enforcement needs Linux with cgroup v2.
+Run a command under a memory ceiling and a process-count cap with
+`nono_py.limited`, which drives the `nono` CLI supervisor. Shows a run that
+succeeds under the caps, a memory hog that is OOM-killed (`result.oom_killed`),
+and a thread hog that hits `max_processes` (`pids.max`) so new forks are refused
+with `EAGAIN` and it exits non-zero without being killed. Requires the `nono`
+binary (on `PATH` or via `NONO_BIN`); enforcement needs Linux with cgroup v2.
 
 ```bash
 python examples/15_resource_limiting.py
