@@ -118,14 +118,17 @@ class CapabilitySet:
     def allow_localhost_port(self, port: int) -> None:
         """Allow bidirectional localhost TCP on a specific port.
 
-        The child may connect to and bind/listen on ``127.0.0.1:port``. Combine
-        with ``block_network()`` to restrict localhost to only the given port(s)
-        instead of all of localhost.
+        Has NO effect on its own: only takes effect when combined with
+        ``block_network()`` (or ``proxy_only()``). In the default allow-all mode
+        the port list is ignored on every kernel and the child keeps full
+        network access. When paired with ``block_network()`` the child may
+        connect to and bind/listen on the given port(s) and nothing else.
 
-        Enforcement: Linux Landlock ABI V4+ (kernel >= 6.7) or macOS. On Linux
-        kernels < 6.7, this is not yet enforceable alongside ``block_network()``
-        and the sandbox fails closed at apply time; check
-        ``detect_abi().has_network``.
+        On Linux V4+ Landlock filters by PORT ONLY — the port is permitted on
+        any address, not strictly 127.0.0.1. Enforced on Linux Landlock ABI V4+
+        (kernel >= 6.7) or macOS; on Linux kernels < 6.7 it is not yet
+        enforceable and the sandbox fails closed at apply time (check
+        ``detect_abi().has_network``). Not preserved across SandboxState.
 
         Args:
             port: The localhost TCP port to allow.
@@ -135,10 +138,14 @@ class CapabilitySet:
     def allow_tcp_connect_port(self, port: int) -> None:
         """Allow outbound TCP connect() to a specific port.
 
-        Switches Linux network enforcement to an allowlist model: only listed
-        ports are reachable, all other outbound connections are blocked (e.g.
-        allow 443 while blocking SSH/SMTP). Linux Landlock ABI V4+ only; not
-        available on macOS. See ``allow_localhost_port`` for the kernel caveat.
+        Switches Linux enforcement to an allowlist even without
+        ``block_network()``: only listed ports are reachable, all other outbound
+        is blocked. Landlock filters by PORT ONLY, not destination IP — the port
+        is reachable on ANY host (incl. the public internet), not only approved
+        hosts; use ``proxy_only()`` for host/domain filtering. Linux Landlock
+        ABI V4+ only; fails closed on older kernels. Not available on macOS
+        (RuntimeError at apply time, not at call time). Not preserved across
+        SandboxState.
 
         Args:
             port: The TCP port to allow outbound connections to.
@@ -149,9 +156,12 @@ class CapabilitySet:
         """Allow the child to bind()/listen() on a specific TCP port.
 
         Lets an in-sandbox server (Streamlit/Gradio/Shiny) open a listen port
-        while outbound stays blocked. Pair with ``block_network()``. Linux
-        Landlock ABI V4+ only; not available on macOS. See
-        ``allow_localhost_port`` for the kernel caveat.
+        while outbound stays blocked. On Linux V4+ adding a bind port blocks all
+        outbound connect() on its own (the "implicit block"); pairing with
+        ``block_network()`` is still recommended. Only TCP — UDP egress is not
+        blocked. Linux Landlock ABI V4+ only; fails closed on older kernels. Not
+        available on macOS (RuntimeError at apply time). Not preserved across
+        SandboxState.
 
         Args:
             port: The TCP port to allow the child to bind/listen on.

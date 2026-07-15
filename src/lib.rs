@@ -327,37 +327,54 @@ impl CapabilitySet {
 
     /// Allow bidirectional localhost TCP on a specific port.
     ///
-    /// The sandboxed process may both connect to and bind/listen on
-    /// ``127.0.0.1:port``. Combine with ``block_network()`` to restrict
-    /// localhost access to only the given port(s) instead of all of localhost
-    /// (e.g. permit only the nono proxy port and block internal services on
-    /// other localhost ports).
+    /// **Has no effect on its own.** This only takes effect when the set is also
+    /// in blocked or proxy-only mode — i.e. you must also call
+    /// ``block_network()`` (or ``proxy_only()``). In the default allow-all mode
+    /// the localhost port list is ignored on *every* kernel and the child keeps
+    /// full network access; calling this method alone restricts nothing and
+    /// raises no error. When paired with ``block_network()`` the child may
+    /// connect to and bind/listen on the given port(s) and nothing else.
     ///
     /// Enforcement:
     ///     - Linux Landlock ABI V4+ (kernel >= 6.7): per-port ConnectTcp +
-    ///       BindTcp rules.
-    ///     - macOS: per-port outbound; bind/inbound is blanket.
-    ///     - Linux kernels < 6.7 (Landlock ABI < V4): NOT YET enforceable
-    ///       alongside ``block_network()`` — the sandbox fails closed at apply
-    ///       time with a RuntimeError. Use ``detect_abi().has_network`` to check
-    ///       support. (Kernel < V4 support is planned via a seccomp fallback.)
+    ///       BindTcp rules. NOTE: Landlock filters by PORT ONLY — the rule
+    ///       permits the port on ANY address, not strictly ``127.0.0.1``.
+    ///       Loopback-only scoping requires the seccomp supervisor path (the
+    ///       kernel < V4 work, not yet implemented).
+    ///     - macOS: per-port outbound; bind/inbound is blanket (all ports).
+    ///     - Linux kernels < 6.7 (Landlock ABI < V4), incl. the common ECS 6.1
+    ///       target: NOT YET enforceable with ``block_network()`` — the sandbox
+    ///       fails closed at apply time (``apply()`` raises RuntimeError;
+    ///       ``sandboxed_exec()`` exits non-zero without running the command).
+    ///       Support is pending a crate seccomp-fallback change. Probe
+    ///       ``detect_abi().has_network``.
+    ///
+    /// Not serviced under ``proxy_only()`` on the < V4 seccomp path, and not
+    /// preserved across ``SandboxState`` serialization (see SandboxState docs).
     ///
     /// Args:
-    ///     port: The localhost TCP port to allow.
+    ///     port: The localhost TCP port to allow. Port 0 is a wildcard meaning
+    ///         all localhost outbound on macOS; rejected on Linux with block-net.
     fn allow_localhost_port(&mut self, port: u16) {
         self.inner.add_localhost_port(port);
     }
 
     /// Allow outbound TCP connect() to a specific port.
     ///
-    /// Adds ``port`` to the connect allowlist. On Linux, adding any port rule
-    /// switches network to an allowlist model: only the listed ports are
-    /// reachable and all other outbound connections are blocked. Use this to
-    /// permit, e.g., HTTPS (443) to approved hosts while blocking SSH/SMTP and
-    /// arbitrary high ports.
+    /// Adds ``port`` to the connect allowlist. On Linux this switches the
+    /// network to an allowlist model even without ``block_network()``: only the
+    /// listed port(s) are reachable and all other outbound connections are
+    /// blocked (e.g. allow 443 while blocking SSH/SMTP and high ports).
     ///
-    /// Enforcement: Linux Landlock ABI V4+ only (see ``allow_localhost_port``
-    /// for the kernel-version caveat). Not available on macOS.
+    /// Landlock filters by PORT ONLY, not by destination IP: the allowed port
+    /// is reachable on ANY host, including the public internet — NOT only
+    /// "approved hosts". For host/domain-level filtering use the nono proxy
+    /// (``proxy_only()``).
+    ///
+    /// Enforcement: Linux Landlock ABI V4+ only; fails closed at apply time on
+    /// older kernels (see ``allow_localhost_port``). Not available on macOS —
+    /// raises RuntimeError at apply()/sandboxed_exec() time, not when this
+    /// method is called. Not preserved across ``SandboxState``.
     ///
     /// Args:
     ///     port: The TCP port to allow outbound connections to.
@@ -368,14 +385,17 @@ impl CapabilitySet {
     /// Allow the sandboxed process to bind()/listen() on a specific TCP port.
     ///
     /// Lets an in-sandbox server (e.g. Streamlit/Gradio/Shiny) open a local
-    /// listen port while outbound connections stay blocked. Adding a bind port
-    /// switches Linux network enforcement to an allowlist model, so pair it
-    /// with ``block_network()`` (or rely on the implicit block) to keep
-    /// outbound egress closed.
+    /// listen port while outbound connections stay blocked. On Linux Landlock
+    /// V4+ adding a bind port switches to an allowlist that blocks all outbound
+    /// connect() on its own (the "implicit block"); pairing with
+    /// ``block_network()`` is still recommended for clarity. Only TCP is
+    /// affected — UDP egress is NOT blocked by Landlock.
     ///
-    /// Enforcement: Linux Landlock ABI V4+ (per-port BindTcp); see
-    /// ``allow_localhost_port`` for the kernel-version caveat. Not available on
-    /// macOS.
+    /// Enforcement: Linux Landlock ABI V4+ (per-port BindTcp); fails closed at
+    /// apply time on older kernels, incl. the 6.1 target (support pending the
+    /// crate seccomp change). Not available on macOS — raises RuntimeError at
+    /// apply time, not when this method is called. Not preserved across
+    /// ``SandboxState``.
     ///
     /// Args:
     ///     port: The TCP port to allow the child to bind/listen on.
@@ -572,6 +592,15 @@ impl DetectedAbi {
 ///
 /// Use this to persist sandbox state to JSON and restore it later.
 /// Useful for passing sandbox configuration across process boundaries.
+///
+/// **Limitation:** only filesystem grants, unix-socket grants, and the
+/// blocked/allowed network flag are serialized. Per-port TCP allowlists set via
+/// ``allow_localhost_port`` / ``allow_tcp_connect_port`` / ``allow_bind_port``
+/// are NOT preserved: a round-trip drops them. With ``block_network()`` this
+/// makes the restored set *more* restrictive (the allowed ports are lost); with
+/// the default allow-all mode it drops the constraint entirely. Do not use
+/// SandboxState to transfer a capability set that relies on port allowlists
+/// until the underlying crate serializes them (tracked upstream).
 ///
 /// Example:
 ///     >>> state = SandboxState.from_caps(caps)
