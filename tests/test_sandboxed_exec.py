@@ -510,3 +510,142 @@ class TestSandboxedExecEnforcementMode:
                 cwd=str(temp_dir),
                 enforcement_mode=mode,
             )
+
+
+def _landlock_has_network() -> bool:
+    """True if the running kernel enforces Landlock TCP port rules (ABI V4+)."""
+    import nono_py
+
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        return bool(nono_py.detect_abi().has_network)
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(
+    not _landlock_has_network(),
+    reason="per-port TCP filtering needs Landlock ABI V4+ (kernel >= 6.7)",
+)
+class TestSandboxedExecPortFiltering:
+    """allow_bind_port / allow_localhost_port / allow_tcp_connect_port (items 3, 8)."""
+
+    @pytest.fixture
+    def base_caps(self, temp_dir):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        return caps
+
+    def test_allow_bind_port_permits_listen(self, base_caps, temp_dir):
+        """A server may bind its allowed port while outbound stays blocked."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "s = socket.socket()\n"
+            "s.bind(('127.0.0.1', 8080))\n"
+            "s.listen(1)\n"
+            "print('BIND_OK')\n"
+        )
+        result = sandboxed_exec(
+            base_caps, [sys.executable, "-c", prog], cwd=str(temp_dir), timeout_secs=15.0
+        )
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.strip() == b"BIND_OK"
+
+    def test_bind_denied_on_other_port(self, base_caps, temp_dir):
+        """Binding a port that was not allowed fails."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "s = socket.socket()\n"
+            "try:\n"
+            "    s.bind(('127.0.0.1', 9090))\n"
+            "    s.listen(1)\n"
+            "    print('BIND_OK')\n"
+            "except OSError:\n"
+            "    print('BIND_DENIED')\n"
+        )
+        result = sandboxed_exec(
+            base_caps, [sys.executable, "-c", prog], cwd=str(temp_dir), timeout_secs=15.0
+        )
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.strip() == b"BIND_DENIED"
+
+    def test_outbound_blocked_while_bind_allowed(self, base_caps, temp_dir):
+        """allow_bind_port does not open outbound egress."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "try:\n"
+            "    socket.create_connection(('1.1.1.1', 80), timeout=3)\n"
+            "    print('CONNECT_OK')\n"
+            "except OSError:\n"
+            "    print('CONNECT_BLOCKED')\n"
+        )
+        result = sandboxed_exec(
+            base_caps, [sys.executable, "-c", prog], cwd=str(temp_dir), timeout_secs=15.0
+        )
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.strip() == b"CONNECT_BLOCKED"
+
+    def test_allow_localhost_port_connect(self, base_caps, temp_dir):
+        """A permitted localhost port is reachable; an unlisted one is not.
+
+        The parent (unsandboxed) opens two listeners; the sandboxed child may
+        connect only to the allowed port.
+        """
+        import socket
+
+        listener_ok = socket.socket()
+        listener_ok.bind(("127.0.0.1", 0))
+        listener_ok.listen(1)
+        allowed_port = listener_ok.getsockname()[1]
+
+        listener_blocked = socket.socket()
+        listener_blocked.bind(("127.0.0.1", 0))
+        listener_blocked.listen(1)
+        blocked_port = listener_blocked.getsockname()[1]
+
+        try:
+            base_caps.block_network()
+            base_caps.allow_localhost_port(allowed_port)
+            prog = (
+                "import socket, sys\n"
+                "allowed, blocked = int(sys.argv[1]), int(sys.argv[2])\n"
+                "def probe(p):\n"
+                "    try:\n"
+                "        socket.create_connection(('127.0.0.1', p), timeout=3).close()\n"
+                "        return 'OK'\n"
+                "    except OSError:\n"
+                "        return 'BLOCKED'\n"
+                "print(probe(allowed), probe(blocked))\n"
+            )
+            result = sandboxed_exec(
+                base_caps,
+                [sys.executable, "-c", prog, str(allowed_port), str(blocked_port)],
+                cwd=str(temp_dir),
+                timeout_secs=15.0,
+            )
+            assert result.exit_code == 0, result.stderr
+            assert result.stdout.strip() == b"OK BLOCKED"
+        finally:
+            listener_ok.close()
+            listener_blocked.close()
+
+
+class TestCapabilitySetPortMethods:
+    """The port methods are callable regardless of kernel enforcement support."""
+
+    def test_methods_exist_and_accept_ports(self):
+        caps = CapabilitySet()
+        caps.block_network()
+        caps.allow_localhost_port(5000)
+        caps.allow_tcp_connect_port(443)
+        caps.allow_bind_port(8080)
+        # summary should render without error
+        assert isinstance(caps.summary(), str)

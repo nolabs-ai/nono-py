@@ -325,6 +325,64 @@ impl CapabilitySet {
         });
     }
 
+    /// Allow bidirectional localhost TCP on a specific port.
+    ///
+    /// The sandboxed process may both connect to and bind/listen on
+    /// ``127.0.0.1:port``. Combine with ``block_network()`` to restrict
+    /// localhost access to only the given port(s) instead of all of localhost
+    /// (e.g. permit only the nono proxy port and block internal services on
+    /// other localhost ports).
+    ///
+    /// Enforcement:
+    ///     - Linux Landlock ABI V4+ (kernel >= 6.7): per-port ConnectTcp +
+    ///       BindTcp rules.
+    ///     - macOS: per-port outbound; bind/inbound is blanket.
+    ///     - Linux kernels < 6.7 (Landlock ABI < V4): NOT YET enforceable
+    ///       alongside ``block_network()`` — the sandbox fails closed at apply
+    ///       time with a RuntimeError. Use ``detect_abi().has_network`` to check
+    ///       support. (Kernel < V4 support is planned via a seccomp fallback.)
+    ///
+    /// Args:
+    ///     port: The localhost TCP port to allow.
+    fn allow_localhost_port(&mut self, port: u16) {
+        self.inner.add_localhost_port(port);
+    }
+
+    /// Allow outbound TCP connect() to a specific port.
+    ///
+    /// Adds ``port`` to the connect allowlist. On Linux, adding any port rule
+    /// switches network to an allowlist model: only the listed ports are
+    /// reachable and all other outbound connections are blocked. Use this to
+    /// permit, e.g., HTTPS (443) to approved hosts while blocking SSH/SMTP and
+    /// arbitrary high ports.
+    ///
+    /// Enforcement: Linux Landlock ABI V4+ only (see ``allow_localhost_port``
+    /// for the kernel-version caveat). Not available on macOS.
+    ///
+    /// Args:
+    ///     port: The TCP port to allow outbound connections to.
+    fn allow_tcp_connect_port(&mut self, port: u16) {
+        self.inner.add_tcp_connect_port(port);
+    }
+
+    /// Allow the sandboxed process to bind()/listen() on a specific TCP port.
+    ///
+    /// Lets an in-sandbox server (e.g. Streamlit/Gradio/Shiny) open a local
+    /// listen port while outbound connections stay blocked. Adding a bind port
+    /// switches Linux network enforcement to an allowlist model, so pair it
+    /// with ``block_network()`` (or rely on the implicit block) to keep
+    /// outbound egress closed.
+    ///
+    /// Enforcement: Linux Landlock ABI V4+ (per-port BindTcp); see
+    /// ``allow_localhost_port`` for the kernel-version caveat. Not available on
+    /// macOS.
+    ///
+    /// Args:
+    ///     port: The TCP port to allow the child to bind/listen on.
+    fn allow_bind_port(&mut self, port: u16) {
+        self.inner.add_tcp_bind_port(port);
+    }
+
     /// Add a raw platform-specific sandbox rule.
     ///
     /// On macOS, this is a Seatbelt S-expression string injected verbatim

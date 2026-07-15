@@ -115,6 +115,49 @@ class CapabilitySet:
         """
         ...
 
+    def allow_localhost_port(self, port: int) -> None:
+        """Allow bidirectional localhost TCP on a specific port.
+
+        The child may connect to and bind/listen on ``127.0.0.1:port``. Combine
+        with ``block_network()`` to restrict localhost to only the given port(s)
+        instead of all of localhost.
+
+        Enforcement: Linux Landlock ABI V4+ (kernel >= 6.7) or macOS. On Linux
+        kernels < 6.7, this is not yet enforceable alongside ``block_network()``
+        and the sandbox fails closed at apply time; check
+        ``detect_abi().has_network``.
+
+        Args:
+            port: The localhost TCP port to allow.
+        """
+        ...
+
+    def allow_tcp_connect_port(self, port: int) -> None:
+        """Allow outbound TCP connect() to a specific port.
+
+        Switches Linux network enforcement to an allowlist model: only listed
+        ports are reachable, all other outbound connections are blocked (e.g.
+        allow 443 while blocking SSH/SMTP). Linux Landlock ABI V4+ only; not
+        available on macOS. See ``allow_localhost_port`` for the kernel caveat.
+
+        Args:
+            port: The TCP port to allow outbound connections to.
+        """
+        ...
+
+    def allow_bind_port(self, port: int) -> None:
+        """Allow the child to bind()/listen() on a specific TCP port.
+
+        Lets an in-sandbox server (Streamlit/Gradio/Shiny) open a listen port
+        while outbound stays blocked. Pair with ``block_network()``. Linux
+        Landlock ABI V4+ only; not available on macOS. See
+        ``allow_localhost_port`` for the kernel caveat.
+
+        Args:
+            port: The TCP port to allow the child to bind/listen on.
+        """
+        ...
+
     def platform_rule(self, rule: str) -> None:
         """Add a raw platform-specific sandbox rule.
 
