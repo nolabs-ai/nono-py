@@ -4,10 +4,14 @@ build-backend = "maturin"
 
 [project]
 name = "nono-py"
-version = "0.12.0"
+version = "0.13.0"
 description = "Python bindings for nono capability-based sandboxing"
 readme = "README.md"
-authors = [{ name = "Luke Hinds", email = "luke@alwaysfurther.ai" }]
+authors = [
+    { name = "Luke Hinds", email = "luke@nolabs.ai" },
+    { name = "Aleksy Siek", email = "aleksy@nolabs.ai" },
+    { name = "connrg", email = "conor@nolabs.ai" },
+]
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 keywords = ["sandbox", "security", "capability", "landlock", "seatbelt"]
