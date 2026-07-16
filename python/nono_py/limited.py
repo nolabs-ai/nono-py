@@ -10,6 +10,10 @@ leaf on Linux and lets the kernel police the whole process tree:
   ``fork``/``clone`` with ``EAGAIN``. **Nothing is killed** — the offending
   process just fails to spawn — so there is no fixed exit code, unlike the
   memory OOM path. The failing command surfaces its own error and status.
+  This is a hard, per-tree, unescapable cap. The in-process
+  :func:`~nono_py.sandboxed_exec` offers ``max_processes`` (RLIMIT_NPROC), a
+  best-effort per-UID cap that a child can escape (e.g. via ``setsid``); prefer
+  this cgroup cap where cgroup v2 delegation is available.
 
 That enforcement code lives in the ``nono`` binary and is exercised by its own
 live cgroup tests.

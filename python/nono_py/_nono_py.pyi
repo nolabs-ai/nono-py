@@ -380,6 +380,10 @@ def sandboxed_exec(
     env: list[tuple[str, str]] | None = None,
     inherit_env: bool = False,
     max_processes: int | None = None,
+    max_cpu_seconds: int | None = None,
+    max_file_size_bytes: int | None = None,
+    max_open_files: int | None = None,
+    enforcement_mode: str = "auto",
 ) -> ExecResult:
     """Execute a command in a sandboxed child process.
 
@@ -395,15 +399,29 @@ def sandboxed_exec(
         max_processes: Optional RLIMIT_NPROC value for the sandboxed child.
             This limit is enforced per real UID by the OS, not per sandbox
             process tree, and is only useful when sandboxed executions run as a
-            dedicated Unix user.
+            dedicated Unix user. It is best-effort and escapable (e.g. via
+            setsid). For a hard, unescapable per-tree cap use
+            ``nono_py.limited.run(max_processes=...)`` (cgroup v2 pids.max); use
+            max_processes for the in-process path or when cgroup v2 delegation
+            is unavailable.
+        max_cpu_seconds: Optional RLIMIT_CPU value (CPU seconds). Soft and hard
+            limits are set equal, so reaching the cap terminates the child with
+            SIGKILL (SIGXCPU is not reliably deliverable).
+        max_file_size_bytes: Optional RLIMIT_FSIZE value (max bytes the child may
+            write to any single file). A write past the limit fails with EFBIG
+            and raises SIGXFSZ, which terminates the child if unhandled.
+        max_open_files: Optional RLIMIT_NOFILE value (max open file descriptors).
+        enforcement_mode: OS mechanism to apply: "auto" (default), "landlock",
+            or "seccomp". "landlock"/"seccomp" are Linux-only.
 
     Returns:
         ExecResult with stdout, stderr, and exit_code
 
     Raises:
         RuntimeError: If fork fails or command cannot be executed
-        ValueError: If command is empty, timeout is negative, or max_processes
-            is zero
+        ValueError: If command is empty, timeout is negative,
+            max_processes/max_cpu_seconds/max_open_files is zero, or
+            enforcement_mode is invalid
     """
     ...
 

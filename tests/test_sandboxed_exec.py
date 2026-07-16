@@ -1,6 +1,7 @@
 """Tests for sandboxed_exec function."""
 
 import os
+import signal
 import sys
 import time
 
@@ -326,4 +327,186 @@ class TestSandboxedExec:
                 base_caps,
                 ["nonexistent_command_xyz"],
                 cwd=str(temp_dir),
+            )
+
+
+class TestSandboxedExecResourceLimits:
+    """Resource-limit caps applied via setrlimit before exec."""
+
+    @pytest.fixture
+    def base_caps(self, temp_dir):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        return caps
+
+    def test_max_cpu_seconds_kills_runaway(self, base_caps, temp_dir):
+        """A CPU-bound loop is terminated by the CPU cap, not our timeout path."""
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "x = 0\nwhile True:\n    x += 1"],
+            cwd=str(temp_dir),
+            max_cpu_seconds=1,
+            timeout_secs=30.0,
+        )
+        # The cap terminates the child by signal. Because soft == hard the kernel
+        # delivers SIGKILL; some kernels/timing deliver SIGXCPU first. Either way
+        # it is a signal death, and NOT our timeout path (which returns 124, and
+        # would only fire at 30s — far beyond the ~1s CPU cap).
+        assert result.exit_code in (-signal.SIGKILL, -signal.SIGXCPU), result.exit_code
+
+    def test_max_file_size_bytes_blocks_large_write(self, base_caps, temp_dir):
+        """Writing past RLIMIT_FSIZE fails instead of filling the disk."""
+        target = temp_dir / "big.bin"
+        prog = (
+            "import sys\n"
+            "with open(sys.argv[1], 'wb') as f:\n"
+            "    f.write(b'x' * 1_000_000)\n"
+            "    f.flush()\n"
+            "print('WROTE')\n"
+        )
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", prog, str(target)],
+            cwd=str(temp_dir),
+            max_file_size_bytes=4096,
+            timeout_secs=15.0,
+        )
+        assert result.exit_code != 0
+        assert b"WROTE" not in result.stdout
+        # The file must not have grown past the cap.
+        if target.exists():
+            assert target.stat().st_size <= 1_000_000
+
+    def test_max_file_size_zero_is_allowed_without_writes(self, base_caps, temp_dir):
+        """A zero file-size cap is a valid 'no writes' policy, not an error."""
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "print('ok')"],
+            cwd=str(temp_dir),
+            max_file_size_bytes=0,
+        )
+        assert result.exit_code == 0
+        assert result.stdout.strip() == b"ok"
+
+    def test_max_open_files_enforced(self, base_caps, temp_dir):
+        """The child cannot exceed the RLIMIT_NOFILE cap."""
+        readable = temp_dir / "readme.txt"
+        readable.write_text("hello")
+        prog = (
+            "import sys\n"
+            "held = []\n"
+            "try:\n"
+            "    for _ in range(1000):\n"
+            "        held.append(open(sys.argv[1]))\n"
+            "    print('OPENED_ALL', len(held))\n"
+            "except OSError:\n"
+            "    print('BLOCKED', len(held))\n"
+        )
+        capped = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", prog, str(readable)],
+            cwd=str(temp_dir),
+            max_open_files=96,
+            timeout_secs=15.0,
+        )
+        assert capped.exit_code == 0
+        assert b"BLOCKED" in capped.stdout
+
+        uncapped = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", prog, str(readable)],
+            cwd=str(temp_dir),
+            timeout_secs=15.0,
+        )
+        assert uncapped.exit_code == 0
+        assert b"OPENED_ALL" in uncapped.stdout
+
+    def test_max_open_files_too_low_fails_closed(self, base_caps, temp_dir):
+        """A NOFILE cap below what the sandbox needs to install fails closed:
+        the child aborts before exec rather than running unsandboxed."""
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "print('RAN')"],
+            cwd=str(temp_dir),
+            max_open_files=3,
+            timeout_secs=15.0,
+        )
+        assert result.exit_code != 0
+        assert b"RAN" not in result.stdout
+
+    def test_zero_max_cpu_seconds_raises(self, base_caps, temp_dir):
+        with pytest.raises(ValueError, match="max_cpu_seconds must be positive"):
+            sandboxed_exec(base_caps, ["echo", "hi"], cwd=str(temp_dir), max_cpu_seconds=0)
+
+    def test_zero_max_open_files_raises(self, base_caps, temp_dir):
+        with pytest.raises(ValueError, match="max_open_files must be positive"):
+            sandboxed_exec(base_caps, ["echo", "hi"], cwd=str(temp_dir), max_open_files=0)
+
+
+class TestSandboxedExecEnforcementMode:
+    """enforcement_mode pins the OS mechanism for subprocess sandboxing."""
+
+    @pytest.fixture
+    def base_caps(self, temp_dir):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        return caps
+
+    def _assert_mode_enforces(self, base_caps, temp_dir, mode):
+        # A permitted command runs under the chosen mode...
+        ran = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "print(21 * 2)"],
+            cwd=str(temp_dir),
+            enforcement_mode=mode,
+        )
+        assert ran.exit_code == 0, ran.stderr
+        assert ran.stdout.strip() == b"42"
+        # ...and the mode must still SANDBOX: a read outside the allow-list is
+        # denied. This guards against a future refactor making a mode a no-op
+        # (fail-open) — which "it runs and exits 0" alone would not catch.
+        denied = sandboxed_exec(
+            base_caps,
+            ["cat", "/etc/passwd"],
+            cwd=str(temp_dir),
+            enforcement_mode=mode,
+        )
+        assert denied.exit_code != 0
+        assert b"root:" not in denied.stdout
+
+    def test_auto_mode_enforces(self, base_caps, temp_dir):
+        self._assert_mode_enforces(base_caps, temp_dir, "auto")
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="seccomp is Linux-only")
+    def test_seccomp_mode_enforces(self, base_caps, temp_dir):
+        self._assert_mode_enforces(base_caps, temp_dir, "seccomp")
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="landlock is Linux-only")
+    def test_landlock_mode_enforces(self, base_caps, temp_dir):
+        self._assert_mode_enforces(base_caps, temp_dir, "landlock")
+
+    def test_invalid_mode_raises(self, base_caps, temp_dir):
+        with pytest.raises(ValueError, match="enforcement_mode must be"):
+            sandboxed_exec(
+                base_caps,
+                ["echo", "x"],
+                cwd=str(temp_dir),
+                enforcement_mode="bogus",
+            )
+
+    @pytest.mark.parametrize("mode", ["AUTO", "Auto", " auto", "seccomp ", "landlock\n"])
+    def test_mode_matching_is_strict(self, base_caps, temp_dir, mode):
+        """enforcement_mode is matched exactly (no case-folding / trimming).
+
+        Pins the current contract so a future "be lenient" change is a conscious,
+        tested decision rather than a silent one.
+        """
+        with pytest.raises(ValueError, match="enforcement_mode must be"):
+            sandboxed_exec(
+                base_caps,
+                ["echo", "x"],
+                cwd=str(temp_dir),
+                enforcement_mode=mode,
             )

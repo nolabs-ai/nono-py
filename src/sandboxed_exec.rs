@@ -23,6 +23,86 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+/// Which OS enforcement mechanism `sandboxed_exec` applies in the child.
+///
+/// Mirrors the module-level `apply_landlock` / `apply_seccomp` selectors for the
+/// in-process path, letting callers pin subprocess enforcement instead of relying
+/// on auto-detection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnforcementMode {
+    /// Auto-detect the best mechanism (Landlock, falling back to seccomp).
+    Auto,
+    /// Landlock only. Errors if network restrictions need the seccomp fallback.
+    Landlock,
+    /// Landlock filesystem/process sandboxing plus the seccomp TCP fallback.
+    Seccomp,
+}
+
+fn parse_enforcement_mode(mode: &str) -> PyResult<EnforcementMode> {
+    match mode {
+        "auto" => Ok(EnforcementMode::Auto),
+        "landlock" => Ok(EnforcementMode::Landlock),
+        "seccomp" => Ok(EnforcementMode::Seccomp),
+        other => Err(PyValueError::new_err(format!(
+            "enforcement_mode must be 'auto', 'landlock', or 'seccomp', got '{}'",
+            other
+        ))),
+    }
+}
+
+/// Clamp a u64 resource-limit value into the platform's `rlim_t`.
+fn clamp_rlim(value: u64) -> libc::rlim_t {
+    #[cfg(target_pointer_width = "64")]
+    {
+        value
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        value.min(libc::rlim_t::MAX as u64) as libc::rlim_t
+    }
+}
+
+/// `setrlimit`'s resource argument type differs across libc implementations:
+/// `c_uint` on glibc, `c_int` on musl and macOS. This alias lets `set_rlimit`
+/// take the `libc::RLIMIT_*` constants directly, with no cast at the call sites.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::c_uint;
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+type RlimitResource = libc::c_int;
+
+/// Apply a single `setrlimit` cap (soft == hard) before exec.
+fn set_rlimit(resource: RlimitResource, value: u64) -> IoResult<()> {
+    let rlim = clamp_rlim(value);
+    let limit = libc::rlimit {
+        rlim_cur: rlim,
+        rlim_max: rlim,
+    };
+    // SAFETY: setrlimit reads the provided rlimit and changes only this
+    // process's resource limits before exec.
+    let ret = unsafe { libc::setrlimit(resource, &limit) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Write a diagnostic to stderr and exit the child with code 126. Never returns.
+///
+/// Used only after fork, where returning a `PyErr` to the parent is impossible.
+fn child_die(detail: &str) -> ! {
+    let msg = detail.as_bytes();
+    // SAFETY: write() to STDERR and _exit() are valid in the forked child.
+    unsafe {
+        libc::write(
+            libc::STDERR_FILENO,
+            msg.as_ptr().cast::<libc::c_void>(),
+            msg.len(),
+        );
+        libc::_exit(126);
+    }
+}
+
 /// Result of a sandboxed command execution.
 ///
 /// Attributes:
@@ -60,6 +140,10 @@ struct ForkContext {
     cwd_c: Option<CString>,
     timeout_secs: Option<f64>,
     max_processes: Option<u64>,
+    max_cpu_seconds: Option<u64>,
+    max_file_size_bytes: Option<u64>,
+    max_open_files: Option<u64>,
+    enforcement_mode: EnforcementMode,
 }
 
 /// Pipe file descriptors for stdout or stderr.
@@ -104,7 +188,20 @@ struct ProxySupervisor {
 ///     max_processes: Optional RLIMIT_NPROC value for the child. This is
 ///         enforced by the OS per real UID, not per sandbox process tree, and
 ///         is useful only when sandboxed executions run as a dedicated Unix
-///         user.
+///         user. It is a best-effort cap that a child can escape (e.g. via
+///         setsid). For a hard, unescapable per-tree process cap use
+///         `nono_py.limited.run(max_processes=...)` (cgroup v2 pids.max); prefer
+///         that where cgroup v2 delegation is available, and use max_processes
+///         for the in-process path or as a fallback when it is not.
+///     max_cpu_seconds: Optional RLIMIT_CPU value (seconds of CPU time). The
+///         soft and hard limits are set equal, so reaching the cap terminates
+///         the child with SIGKILL (SIGXCPU is not reliably deliverable).
+///     max_file_size_bytes: Optional RLIMIT_FSIZE value (max bytes the child
+///         may write to any single file). A write past the limit fails with
+///         EFBIG and raises SIGXFSZ, which terminates the child if unhandled.
+///     max_open_files: Optional RLIMIT_NOFILE value (max open file descriptors).
+///     enforcement_mode: Which OS mechanism to apply: "auto" (default, detect
+///         best), "landlock", or "seccomp". "landlock"/"seccomp" are Linux-only.
 ///
 /// Returns:
 ///     ExecResult with stdout, stderr, and exit_code
@@ -112,10 +209,11 @@ struct ProxySupervisor {
 /// Raises:
 ///     RuntimeError: If fork fails, sandbox cannot be applied, or the
 ///         command cannot be executed
-///     ValueError: If the command list is empty, timeout is negative, or
-///         max_processes is zero
+///     ValueError: If the command list is empty, timeout is negative,
+///         max_processes/max_cpu_seconds/max_open_files is zero, or
+///         enforcement_mode is invalid
 #[pyfunction]
-#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None, inherit_env=false, max_processes=None))]
+#[pyo3(signature = (caps, command, cwd=None, timeout_secs=None, env=None, inherit_env=false, max_processes=None, max_cpu_seconds=None, max_file_size_bytes=None, max_open_files=None, enforcement_mode="auto"))]
 #[allow(clippy::too_many_arguments)]
 pub fn sandboxed_exec(
     py: Python<'_>,
@@ -126,6 +224,10 @@ pub fn sandboxed_exec(
     env: Option<Vec<(String, String)>>,
     inherit_env: bool,
     max_processes: Option<u64>,
+    max_cpu_seconds: Option<u64>,
+    max_file_size_bytes: Option<u64>,
+    max_open_files: Option<u64>,
+    enforcement_mode: &str,
 ) -> PyResult<ExecResult> {
     if command.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -152,6 +254,44 @@ pub fn sandboxed_exec(
         ));
     }
 
+    // A zero CPU-time or open-file cap kills the child before it can do useful
+    // work, which is almost certainly a mistake. A zero file-size cap is a valid
+    // "no writes" policy, so it is allowed.
+    if max_cpu_seconds == Some(0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_cpu_seconds must be positive",
+        ));
+    }
+    if max_open_files == Some(0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_open_files must be positive",
+        ));
+    }
+
+    let enforcement_mode = parse_enforcement_mode(enforcement_mode)?;
+
+    #[cfg(not(target_os = "linux"))]
+    if enforcement_mode != EnforcementMode::Auto {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "enforcement_mode 'landlock' and 'seccomp' are only available on Linux",
+        ));
+    }
+
+    // Proxy-only enforcement needs the seccomp fallback supervisor, which only
+    // the auto and seccomp paths install. Landlock-only cannot service it.
+    #[cfg(target_os = "linux")]
+    if enforcement_mode == EnforcementMode::Landlock
+        && matches!(
+            caps.inner.network_mode(),
+            nono::NetworkMode::ProxyOnly { .. }
+        )
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "enforcement_mode='landlock' cannot enforce proxy_only network mode; \
+             use 'auto' or 'seccomp'",
+        ));
+    }
+
     // Verify threading before fork on Linux.
     #[cfg(target_os = "linux")]
     {
@@ -175,6 +315,10 @@ pub fn sandboxed_exec(
         env,
         inherit_env,
         max_processes,
+        max_cpu_seconds,
+        max_file_size_bytes,
+        max_open_files,
+        enforcement_mode,
     )?;
 
     #[cfg(target_os = "linux")]
@@ -198,6 +342,7 @@ pub fn sandboxed_exec(
 }
 
 /// Prepare all data needed for fork+exec while allocation is safe.
+#[allow(clippy::too_many_arguments)]
 fn prepare_fork_context(
     caps: &nono::CapabilitySet,
     command: &[String],
@@ -206,6 +351,10 @@ fn prepare_fork_context(
     env: Option<Vec<(String, String)>>,
     inherit_env: bool,
     max_processes: Option<u64>,
+    max_cpu_seconds: Option<u64>,
+    max_file_size_bytes: Option<u64>,
+    max_open_files: Option<u64>,
+    enforcement_mode: EnforcementMode,
 ) -> PyResult<ForkContext> {
     let resolved_program = resolve_program(&command[0])?;
     let program_c = CString::new(resolved_program.as_os_str().as_bytes())
@@ -242,6 +391,10 @@ fn prepare_fork_context(
         cwd_c,
         timeout_secs,
         max_processes,
+        max_cpu_seconds,
+        max_file_size_bytes,
+        max_open_files,
+        enforcement_mode,
     })
 }
 
@@ -568,19 +721,10 @@ fn child_process(
         }
     }
 
-    if let Some(limit) = ctx.max_processes
-        && let Err(e) = apply_max_processes(limit)
-    {
-        let detail = format!("nono: failed to set max_processes: {}\n", e);
-        let msg = detail.as_bytes();
-        unsafe {
-            libc::write(
-                libc::STDERR_FILENO,
-                msg.as_ptr().cast::<libc::c_void>(),
-                msg.len(),
-            );
-            libc::_exit(126);
-        }
+    // Apply resource-limit caps (RLIMIT_*) after untrusted fds are closed so the
+    // NOFILE cap does not truncate the fd-closing sweep.
+    if let Err(e) = apply_resource_limits(ctx) {
+        child_die(&format!("nono: failed to set resource limit ({})\n", e));
     }
 
     // Change working directory if specified
@@ -600,51 +744,34 @@ fn child_process(
 
     #[cfg(target_os = "linux")]
     {
-        match Sandbox::apply_auto(&ctx.caps) {
+        let applied = match ctx.enforcement_mode {
+            EnforcementMode::Auto => Sandbox::apply_auto(&ctx.caps).map(Some),
+            EnforcementMode::Seccomp => {
+                Sandbox::apply_seccomp(&ctx.caps, nono::sandbox::SeccompOpts::network_fallback())
+                    .map(Some)
+            }
+            EnforcementMode::Landlock => Sandbox::apply_landlock(&ctx.caps).map(|()| None),
+        };
+        match applied {
             Ok(fallback) => {
-                if let Err(e) =
-                    install_proxy_fallback_if_needed(&ctx.caps, fallback, proxy_child_fd)
+                if let Some(fallback) = fallback
+                    && let Err(e) =
+                        install_proxy_fallback_if_needed(&ctx.caps, fallback, proxy_child_fd)
                 {
-                    let detail = format!("nono: proxy-only supervisor setup failed: {}\n", e);
-                    let msg = detail.as_bytes();
-                    unsafe {
-                        libc::write(
-                            libc::STDERR_FILENO,
-                            msg.as_ptr().cast::<libc::c_void>(),
-                            msg.len(),
-                        );
-                        libc::_exit(126);
-                    }
+                    child_die(&format!(
+                        "nono: proxy-only supervisor setup failed: {}\n",
+                        e
+                    ));
                 }
             }
-            Err(e) => {
-                let detail = format!("nono: sandbox apply failed: {}\n", e);
-                let msg = detail.as_bytes();
-                unsafe {
-                    libc::write(
-                        libc::STDERR_FILENO,
-                        msg.as_ptr().cast::<libc::c_void>(),
-                        msg.len(),
-                    );
-                    libc::_exit(126);
-                }
-            }
+            Err(e) => child_die(&format!("nono: sandbox apply failed: {}\n", e)),
         }
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         if let Err(e) = Sandbox::apply_auto(&ctx.caps) {
-            let detail = format!("nono: sandbox apply failed: {}\n", e);
-            let msg = detail.as_bytes();
-            unsafe {
-                libc::write(
-                    libc::STDERR_FILENO,
-                    msg.as_ptr().cast::<libc::c_void>(),
-                    msg.len(),
-                );
-                libc::_exit(126);
-            }
+            child_die(&format!("nono: sandbox apply failed: {}\n", e));
         }
     }
 
@@ -780,24 +907,26 @@ fn set_child_process_group(child_pid: i32) {
     }
 }
 
-fn apply_max_processes(limit: u64) -> IoResult<()> {
-    #[cfg(target_pointer_width = "64")]
-    let rlim: libc::rlim_t = limit;
-    #[cfg(not(target_pointer_width = "64"))]
-    let rlim: libc::rlim_t = limit.min(libc::rlim_t::MAX as u64) as libc::rlim_t;
-    let limit = libc::rlimit {
-        rlim_cur: rlim,
-        rlim_max: rlim,
-    };
-
-    // SAFETY: setrlimit reads the provided rlimit and changes only this
-    // process's resource limits before exec.
-    let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &limit) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+/// Apply the requested `setrlimit` caps in the forked child before exec.
+///
+/// Each cap sets both the soft and hard limit to the requested value. Returns a
+/// human-readable error string identifying which limit failed (the child cannot
+/// propagate a `PyErr` back to the parent).
+fn apply_resource_limits(ctx: &ForkContext) -> Result<(), String> {
+    if let Some(v) = ctx.max_cpu_seconds {
+        set_rlimit(libc::RLIMIT_CPU, v).map_err(|e| format!("max_cpu_seconds: {}", e))?;
     }
+    if let Some(v) = ctx.max_file_size_bytes {
+        set_rlimit(libc::RLIMIT_FSIZE, v).map_err(|e| format!("max_file_size_bytes: {}", e))?;
+    }
+    // RLIMIT_NPROC is enforced by the OS per real UID, not per sandbox tree.
+    if let Some(v) = ctx.max_processes {
+        set_rlimit(libc::RLIMIT_NPROC, v).map_err(|e| format!("max_processes: {}", e))?;
+    }
+    if let Some(v) = ctx.max_open_files {
+        set_rlimit(libc::RLIMIT_NOFILE, v).map_err(|e| format!("max_open_files: {}", e))?;
+    }
+    Ok(())
 }
 
 fn set_nonblocking(fd: i32) -> IoResult<()> {
