@@ -1,7 +1,7 @@
 """Type stubs for the nono native module."""
 
 from enum import Enum
-from typing import TypedDict
+from typing import Any, TypedDict
 
 class AccessMode(Enum):
     """File system access mode."""
@@ -431,7 +431,53 @@ class ExecResult:
         """Process exit code (0 = success, -N = killed by signal N)."""
         ...
 
+    def session_diagnostics(self) -> dict[str, Any]:
+        """Structured session diagnostic report for this execution.
+
+        Parses stderr for sandbox path/network hints and annotates them with
+        remediations based on the capability set used for the run.
+
+        Returns a dict with keys: ``exit_code`` (int), ``denials`` (list),
+        ``ipc_denials`` (list), ``violations`` (list), ``diagnostics`` (list of
+        dicts with ``code``, ``severity``, ``message``, and optional ``path``).
+        Follow-up hints (e.g. ``command_failed_likely_sandbox``) are only
+        present when ``exit_code != 0``.
+        """
+        ...
+
+    def session_diagnostics_json(self) -> str:
+        """JSON-serialised form of ``session_diagnostics()``."""
+        ...
+
     def __repr__(self) -> str: ...
+
+def build_session_diagnostic_report(exit_code: int) -> dict[str, Any]:
+    """Build a minimal session diagnostic report with no stderr context.
+
+    Returns a dict with keys: ``exit_code``, ``denials``, ``ipc_denials``,
+    ``violations``, ``diagnostics``. Follow-up hints such as
+    ``command_failed_likely_sandbox`` and ``command_failed_application`` are
+    appended only when ``exit_code != 0``.
+    """
+    ...
+
+def merge_diagnostic_report_json(
+    session_report_json: str,
+    proxy_diagnostics_json: str | None = None,
+) -> dict[str, Any]:
+    """Merge session and proxy diagnostic JSON into a combined report.
+
+    ``session_report_json`` must be the JSON string from
+    ``ExecResult.session_diagnostics_json()`` or
+    ``build_session_diagnostic_report()``.
+    ``proxy_diagnostics_json`` must be a JSON array as returned by
+    ``ProxyHandle.diagnostics_json()``, or ``None``.
+
+    Returns a dict with keys ``session`` (the parsed session report) and
+    ``proxy`` (list of proxy diagnostic dicts with ``code``, ``severity``,
+    ``route_prefix``, ``message``).
+    """
+    ...
 
 def sandboxed_exec(
     caps: CapabilitySet,
@@ -762,6 +808,19 @@ class ProxyHandle:
 
     def drain_audit_events(self) -> list[NetworkAuditEvent]:
         """Drain and return collected network audit events."""
+        ...
+
+    def diagnostics(self) -> list[dict[str, Any]]:
+        """Proxy startup diagnostics collected during credential loading.
+
+        Returns a list of dicts, each with keys: ``code`` (str, e.g.
+        ``"credential_not_found"``), ``severity`` (str, e.g. ``"warning"``),
+        ``route_prefix`` (str), ``message`` (str).
+        """
+        ...
+
+    def diagnostics_json(self) -> str:
+        """JSON-serialised form of ``diagnostics()``."""
         ...
 
     def shutdown(self) -> None:

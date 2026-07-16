@@ -512,15 +512,18 @@ class TestSandboxedExecResourceLimits:
         """The child cannot exceed the RLIMIT_NOFILE cap."""
         readable = temp_dir / "readme.txt"
         readable.write_text("hello")
+        # 200 is safely below macOS's default RLIMIT_NOFILE of 256 so the
+        # uncapped run succeeds, while the explicit cap of 96 still blocks it.
+        target = 200
         prog = (
-            "import sys\n"
-            "held = []\n"
-            "try:\n"
-            "    for _ in range(1000):\n"
-            "        held.append(open(sys.argv[1]))\n"
-            "    print('OPENED_ALL', len(held))\n"
-            "except OSError:\n"
-            "    print('BLOCKED', len(held))\n"
+            f"import sys\n"
+            f"held = []\n"
+            f"try:\n"
+            f"    for _ in range({target}):\n"
+            f"        held.append(open(sys.argv[1]))\n"
+            f"    print('OPENED_ALL', len(held))\n"
+            f"except OSError:\n"
+            f"    print('BLOCKED', len(held))\n"
         )
         capped = sandboxed_exec(
             base_caps,
@@ -749,6 +752,18 @@ class TestSandboxedExecEnforcementMode:
                 ["echo", "x"],
                 cwd=str(temp_dir),
                 enforcement_mode="bogus",
+            )
+
+    @pytest.mark.skipif(sys.platform.startswith("linux"), reason="Linux supports landlock/seccomp")
+    @pytest.mark.parametrize("mode", ["landlock", "seccomp"])
+    def test_linux_only_modes_rejected_on_macos(self, base_caps, temp_dir, mode):
+        """landlock and seccomp are rejected on non-Linux even though they parse as valid tokens."""
+        with pytest.raises(ValueError, match="only available on Linux"):
+            sandboxed_exec(
+                base_caps,
+                ["echo", "x"],
+                cwd=str(temp_dir),
+                enforcement_mode=mode,
             )
 
     @pytest.mark.parametrize("mode", ["AUTO", "Auto", " auto", "seccomp ", "landlock\n"])

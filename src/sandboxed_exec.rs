@@ -150,6 +150,7 @@ pub struct ExecResult {
     pub stderr: Vec<u8>,
     #[pyo3(get)]
     pub exit_code: i32,
+    session_report: nono::SessionDiagnosticReport,
 }
 
 #[pymethods]
@@ -162,6 +163,21 @@ impl ExecResult {
             self.stderr.len()
         )
     }
+
+    /// Structured session diagnostic report for this execution.
+    ///
+    /// Parses stderr for sandbox-related path/network hints and attaches
+    /// structured remediations based on the capability set used for the run.
+    fn session_diagnostics(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| crate::diagnostic::session_report_to_py(py, &self.session_report))
+    }
+
+    /// JSON session diagnostic report (see ``session_diagnostics()``).
+    fn session_diagnostics_json(&self) -> PyResult<String> {
+        self.session_report
+            .to_json()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
 }
 
 /// Pre-fork data prepared in the parent (where allocation is safe).
@@ -171,6 +187,7 @@ struct ForkContext {
     argv_c: Vec<CString>,
     env_c: Vec<CString>,
     cwd_c: Option<CString>,
+    cwd: Option<PathBuf>,
     timeout_secs: Option<f64>,
     max_processes: Option<u64>,
     max_cpu_seconds: Option<u64>,
@@ -178,6 +195,7 @@ struct ForkContext {
     max_open_files: Option<u64>,
     uid: Option<u32>,
     gid: Option<u32>,
+    #[cfg(target_os = "linux")]
     enforcement_mode: EnforcementMode,
 }
 
@@ -415,6 +433,7 @@ fn prepare_fork_context(
     max_open_files: Option<u64>,
     uid: Option<u32>,
     gid: Option<u32>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     enforcement_mode: EnforcementMode,
 ) -> PyResult<ForkContext> {
     let resolved_program = resolve_program(&command[0])?;
@@ -431,18 +450,23 @@ fn prepare_fork_context(
 
     let env_c = build_env_cstrings(env.as_deref(), inherit_env)?;
 
-    let cwd_c = match &cwd {
+    let cwd = match &cwd {
         Some(d) => {
             let canonical = std::fs::canonicalize(d).map_err(|e| {
                 PyRuntimeError::new_err(format!("Cannot resolve working directory '{}': {}", d, e))
             })?;
-            Some(
-                CString::new(canonical.as_os_str().as_bytes())
-                    .map_err(|_| PyRuntimeError::new_err("Working directory contains null byte"))?,
-            )
+            Some(canonical)
         }
-        None => None,
+        None => std::env::current_dir().ok(),
     };
+
+    let cwd_c = cwd
+        .as_ref()
+        .map(|path| {
+            CString::new(path.as_os_str().as_bytes())
+                .map_err(|_| PyRuntimeError::new_err("Working directory contains null byte"))
+        })
+        .transpose()?;
 
     Ok(ForkContext {
         caps: caps.clone(),
@@ -450,6 +474,7 @@ fn prepare_fork_context(
         argv_c,
         env_c,
         cwd_c,
+        cwd,
         timeout_secs,
         max_processes,
         max_cpu_seconds,
@@ -457,6 +482,7 @@ fn prepare_fork_context(
         max_open_files,
         uid,
         gid,
+        #[cfg(target_os = "linux")]
         enforcement_mode,
     })
 }
@@ -716,7 +742,7 @@ fn do_fork_sandbox_exec(
         pid,
         stdout_pipe,
         stderr_pipe,
-        ctx.timeout_secs,
+        ctx,
         #[cfg(target_os = "linux")]
         proxy_supervisor_pair,
         #[cfg(target_os = "linux")]
@@ -1136,7 +1162,7 @@ fn parent_process(
     child_pid: i32,
     stdout_pipe: &PipeFds,
     stderr_pipe: &PipeFds,
-    timeout_secs: Option<f64>,
+    ctx: &ForkContext,
     #[cfg(target_os = "linux")] proxy_supervisor_pair: Option<(
         nono::SupervisorSocket,
         nono::SupervisorSocket,
@@ -1175,7 +1201,7 @@ fn parent_process(
 
     let exit_code = wait_for_child(
         child_pid,
-        timeout_secs,
+        ctx.timeout_secs,
         &cancel_readers,
         #[cfg(target_os = "linux")]
         proxy_supervisor.as_mut(),
@@ -1183,11 +1209,18 @@ fn parent_process(
 
     let stdout_buf = stdout_handle.join().unwrap_or_default();
     let stderr_buf = stderr_handle.join().unwrap_or_default();
+    let session_report = crate::diagnostic::build_session_report_from_exec(
+        exit_code,
+        &stderr_buf,
+        ctx.cwd.as_deref(),
+        &ctx.caps,
+    );
 
     Ok(ExecResult {
         stdout: stdout_buf,
         stderr: stderr_buf,
         exit_code,
+        session_report,
     })
 }
 
@@ -1416,25 +1449,23 @@ fn proxy_only_policy(caps: &nono::CapabilitySet) -> Option<ProxyOnlyPolicy> {
     }
 }
 
-/// Resolve a program name to its absolute path by searching PATH.
+/// Resolve a program name to its absolute, canonical path by searching PATH.
+///
+/// Canonicalization matters on macOS: Seatbelt `file-map-executable` rules are
+/// emitted for resolved grant paths, so execve must use the symlink target path
+/// (e.g. uv-managed interpreters under `~/.local/share/uv/python/...`).
 fn resolve_program(program: &str) -> PyResult<PathBuf> {
     let path = Path::new(program);
 
     if program.contains('/') {
-        if path.exists() {
-            return Ok(path.to_path_buf());
-        }
-        return Err(PyRuntimeError::new_err(format!(
-            "Program not found: {}",
-            program
-        )));
+        return canonicalize_existing_program(path, program);
     }
 
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in path_var.split(':') {
             let candidate = Path::new(dir).join(program);
             if candidate.is_file() {
-                return Ok(candidate);
+                return canonicalize_existing_program(&candidate, program);
             }
         }
     }
@@ -1443,6 +1474,19 @@ fn resolve_program(program: &str) -> PyResult<PathBuf> {
         "Program not found in PATH: {}",
         program
     )))
+}
+
+fn canonicalize_existing_program(path: &Path, display: &str) -> PyResult<PathBuf> {
+    if !path.exists() {
+        return Err(PyRuntimeError::new_err(format!(
+            "Program not found: {}",
+            display
+        )));
+    }
+
+    std::fs::canonicalize(path).map_err(|e| {
+        PyRuntimeError::new_err(format!("Cannot resolve program path '{}': {}", display, e))
+    })
 }
 
 /// Get the number of threads in the current process (Linux only).
