@@ -432,6 +432,7 @@ impl ProxyConfig {
                 bind_addr: addr,
                 bind_port,
                 allowed_hosts: filter_hosts,
+                strict_filter: false,
                 routes,
                 external_proxy: external_proxy.map(|e| e.inner),
                 max_connections,
@@ -615,6 +616,23 @@ impl ProxyHandle {
             }
             Ok(list.unbind().into_any())
         })
+    }
+
+    /// Startup diagnostics from credential loading (structured facts, not log text).
+    ///
+    /// Returns a list of dicts with stable ``code``, ``severity``, ``route_prefix``,
+    /// and related fields.
+    fn diagnostics(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            crate::diagnostic::proxy_diagnostics_to_py(py, self.handle.diagnostics())
+        })
+    }
+
+    /// Serialize startup diagnostics to JSON.
+    fn diagnostics_json(&self) -> PyResult<String> {
+        self.handle
+            .diagnostics_json()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Signal the proxy to shut down gracefully.
