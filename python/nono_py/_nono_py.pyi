@@ -115,6 +115,60 @@ class CapabilitySet:
         """
         ...
 
+    def allow_localhost_port(self, port: int) -> None:
+        """Allow bidirectional localhost TCP on a specific port.
+
+        Has NO effect on its own: only takes effect when combined with
+        ``block_network()`` (or ``proxy_only()``). In the default allow-all mode
+        the port list is ignored on every kernel and the child keeps full
+        network access. When paired with ``block_network()`` the child may
+        connect to and bind/listen on the given port(s) and nothing else.
+
+        On Linux V4+ Landlock filters by PORT ONLY — the port is permitted on
+        any address, not strictly 127.0.0.1. Enforced on Linux Landlock ABI V4+
+        (kernel >= 6.7) or macOS; on Linux kernels < 6.7 it is not yet
+        enforceable and the sandbox fails closed at apply time (check
+        ``detect_abi().has_network``). Only TCP — UDP egress is not filtered.
+        Not preserved across SandboxState (from_caps raises rather than drop it).
+
+        Args:
+            port: The localhost TCP port to allow.
+        """
+        ...
+
+    def allow_tcp_connect_port(self, port: int) -> None:
+        """Allow outbound TCP connect() to a specific port.
+
+        Switches Linux enforcement to an allowlist even without
+        ``block_network()``: only listed ports are reachable, all other outbound
+        is blocked. Landlock filters by PORT ONLY, not destination IP — the port
+        is reachable on ANY host (incl. the public internet), not only approved
+        hosts; use ``proxy_only()`` for host/domain filtering. Only TCP — UDP
+        egress is not filtered. Linux Landlock ABI V4+ only; fails closed on
+        older kernels. Not available on macOS (RuntimeError at apply time, not at
+        call time). Not preserved across SandboxState (from_caps raises).
+
+        Args:
+            port: The TCP port to allow outbound connections to.
+        """
+        ...
+
+    def allow_bind_port(self, port: int) -> None:
+        """Allow the child to bind()/listen() on a specific TCP port.
+
+        Lets an in-sandbox server (Streamlit/Gradio/Shiny) open a listen port
+        while outbound stays blocked. On Linux V4+ adding a bind port blocks all
+        outbound connect() on its own (the "implicit block"); pairing with
+        ``block_network()`` is still recommended. Only TCP — UDP egress is not
+        blocked. Linux Landlock ABI V4+ only; fails closed on older kernels. Not
+        available on macOS (RuntimeError at apply time). Not preserved across
+        SandboxState.
+
+        Args:
+            port: The TCP port to allow the child to bind/listen on.
+        """
+        ...
+
     def platform_rule(self, rule: str) -> None:
         """Add a raw platform-specific sandbox rule.
 
@@ -272,7 +326,14 @@ class SandboxState:
 
     @staticmethod
     def from_caps(caps: CapabilitySet) -> SandboxState:
-        """Create a SandboxState snapshot from a CapabilitySet."""
+        """Create a SandboxState snapshot from a CapabilitySet.
+
+        Raises:
+            ValueError: If the capability set carries a per-port TCP allowlist
+                (allow_localhost_port / allow_tcp_connect_port / allow_bind_port).
+                These cannot be serialized, and dropping them silently could
+                widen the restored sandbox, so this fails closed instead.
+        """
         ...
 
     def to_json(self) -> str:

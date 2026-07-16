@@ -325,6 +325,87 @@ impl CapabilitySet {
         });
     }
 
+    /// Allow bidirectional localhost TCP on a specific port.
+    ///
+    /// **Has no effect on its own.** This only takes effect when the set is also
+    /// in blocked or proxy-only mode — i.e. you must also call
+    /// ``block_network()`` (or ``proxy_only()``). In the default allow-all mode
+    /// the localhost port list is ignored on *every* kernel and the child keeps
+    /// full network access; calling this method alone restricts nothing and
+    /// raises no error. When paired with ``block_network()`` the child may
+    /// connect to and bind/listen on the given port(s) and nothing else.
+    ///
+    /// Enforcement:
+    ///     - Linux Landlock ABI V4+ (kernel >= 6.7): per-port ConnectTcp +
+    ///       BindTcp rules. NOTE: Landlock filters by PORT ONLY — the rule
+    ///       permits the port on ANY address, not strictly ``127.0.0.1``.
+    ///       Loopback-only scoping requires the seccomp supervisor path (the
+    ///       kernel < V4 work, not yet implemented).
+    ///     - macOS: per-port outbound; bind/inbound is blanket (all ports).
+    ///     - Linux kernels < 6.7 (Landlock ABI < V4), incl. the common ECS 6.1
+    ///       target: NOT YET enforceable with ``block_network()`` — the sandbox
+    ///       fails closed at apply time (``apply()`` raises RuntimeError;
+    ///       ``sandboxed_exec()`` exits non-zero without running the command).
+    ///       Support is pending a crate seccomp-fallback change. Probe
+    ///       ``detect_abi().has_network``.
+    ///
+    /// Only TCP is affected — UDP egress is not filtered by Landlock. Not
+    /// serviced under ``proxy_only()`` on the < V4 seccomp path, and not
+    /// preserved across ``SandboxState`` (from_caps raises rather than drop it).
+    ///
+    /// Args:
+    ///     port: The localhost TCP port to allow. Port 0 is a wildcard meaning
+    ///         all localhost outbound on macOS; rejected on Linux with block-net
+    ///         (RuntimeError at apply() time, not when this method is called).
+    fn allow_localhost_port(&mut self, port: u16) {
+        self.inner.add_localhost_port(port);
+    }
+
+    /// Allow outbound TCP connect() to a specific port.
+    ///
+    /// Adds ``port`` to the connect allowlist. On Linux this switches the
+    /// network to an allowlist model even without ``block_network()``: only the
+    /// listed port(s) are reachable and all other outbound connections are
+    /// blocked (e.g. allow 443 while blocking SSH/SMTP and high ports).
+    ///
+    /// Landlock filters by PORT ONLY, not by destination IP: the allowed port
+    /// is reachable on ANY host, including the public internet — NOT only
+    /// "approved hosts". For host/domain-level filtering use the nono proxy
+    /// (``proxy_only()``).
+    ///
+    /// Only TCP is affected — UDP egress is not filtered by Landlock. Enforcement:
+    /// Linux Landlock ABI V4+ only; fails closed at apply time on older kernels
+    /// (see ``allow_localhost_port``). Not available on macOS — raises
+    /// RuntimeError at apply()/sandboxed_exec() time, not when this method is
+    /// called. Not preserved across ``SandboxState`` (from_caps raises).
+    ///
+    /// Args:
+    ///     port: The TCP port to allow outbound connections to.
+    fn allow_tcp_connect_port(&mut self, port: u16) {
+        self.inner.add_tcp_connect_port(port);
+    }
+
+    /// Allow the sandboxed process to bind()/listen() on a specific TCP port.
+    ///
+    /// Lets an in-sandbox server (e.g. Streamlit/Gradio/Shiny) open a local
+    /// listen port while outbound connections stay blocked. On Linux Landlock
+    /// V4+ adding a bind port switches to an allowlist that blocks all outbound
+    /// connect() on its own (the "implicit block"); pairing with
+    /// ``block_network()`` is still recommended for clarity. Only TCP is
+    /// affected — UDP egress is NOT blocked by Landlock.
+    ///
+    /// Enforcement: Linux Landlock ABI V4+ (per-port BindTcp); fails closed at
+    /// apply time on older kernels, incl. the 6.1 target (support pending the
+    /// crate seccomp change). Not available on macOS — raises RuntimeError at
+    /// apply time, not when this method is called. Not preserved across
+    /// ``SandboxState``.
+    ///
+    /// Args:
+    ///     port: The TCP port to allow the child to bind/listen on.
+    fn allow_bind_port(&mut self, port: u16) {
+        self.inner.add_tcp_bind_port(port);
+    }
+
     /// Add a raw platform-specific sandbox rule.
     ///
     /// On macOS, this is a Seatbelt S-expression string injected verbatim
@@ -515,6 +596,16 @@ impl DetectedAbi {
 /// Use this to persist sandbox state to JSON and restore it later.
 /// Useful for passing sandbox configuration across process boundaries.
 ///
+/// **Limitation:** only filesystem grants, unix-socket grants, and the
+/// blocked/allowed network flag are serialized. Per-port TCP allowlists set via
+/// ``allow_localhost_port`` / ``allow_tcp_connect_port`` / ``allow_bind_port``
+/// cannot be represented, and dropping them silently could widen a restored
+/// sandbox (in the default allow-all mode a connect/bind allowlist becomes fully
+/// open). To keep this fail-closed, ``from_caps`` **raises** ``ValueError`` if
+/// the capability set carries any port allowlist, rather than silently dropping
+/// it. Remove the port rules, or transfer the CapabilitySet without SandboxState,
+/// until the underlying crate serializes the port vectors (tracked upstream).
+///
 /// Example:
 ///     >>> state = SandboxState.from_caps(caps)
 ///     >>> json_str = state.to_json()
@@ -536,11 +627,29 @@ impl SandboxState {
     ///
     /// Returns:
     ///     A new SandboxState instance
+    ///
+    /// Raises:
+    ///     ValueError: If the capability set carries a per-port TCP allowlist
+    ///         (allow_localhost_port / allow_tcp_connect_port / allow_bind_port).
+    ///         These cannot be serialized, and dropping them silently could widen
+    ///         the restored sandbox, so this fails closed instead.
     #[staticmethod]
-    fn from_caps(caps: &CapabilitySet) -> Self {
-        Self {
-            inner: RustSandboxState::from_caps(&caps.inner),
+    fn from_caps(caps: &CapabilitySet) -> PyResult<Self> {
+        if !caps.inner.tcp_connect_ports().is_empty()
+            || !caps.inner.tcp_bind_ports().is_empty()
+            || !caps.inner.localhost_ports().is_empty()
+        {
+            return Err(PyValueError::new_err(
+                "SandboxState cannot represent per-port TCP allowlists \
+                 (allow_localhost_port / allow_tcp_connect_port / allow_bind_port); \
+                 serializing would silently drop them and could widen the restored \
+                 sandbox. Remove the port rules or transfer the CapabilitySet without \
+                 SandboxState.",
+            ));
         }
+        Ok(Self {
+            inner: RustSandboxState::from_caps(&caps.inner),
+        })
     }
 
     /// Serialize the state to a JSON string.

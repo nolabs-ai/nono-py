@@ -1,5 +1,6 @@
 """Tests for sandboxed_exec function."""
 
+import errno
 import os
 import signal
 import sys
@@ -8,7 +9,11 @@ import time
 import pytest
 from conftest import add_system_paths
 
-from nono_py import AccessMode, CapabilitySet, ExecResult, sandboxed_exec
+from nono_py import AccessMode, CapabilitySet, ExecResult, SandboxState, sandboxed_exec
+
+# errno values that indicate a sandbox (Landlock/seccomp) denial, as opposed to
+# an unrelated failure such as ECONNREFUSED or a routing error.
+_DENIAL_ERRNOS = (errno.EACCES, errno.EPERM)
 
 
 def process_exists(pid: int) -> bool:
@@ -510,3 +515,273 @@ class TestSandboxedExecEnforcementMode:
                 cwd=str(temp_dir),
                 enforcement_mode=mode,
             )
+
+
+def _landlock_has_network() -> bool:
+    """True if the running kernel enforces Landlock TCP port rules (ABI V4+)."""
+    import nono_py
+
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        return bool(nono_py.detect_abi().has_network)
+    except Exception:
+        return False
+
+
+# A child probe that connects to a (port, expecting either success or a sandbox
+# denial) and prints an unambiguous, errno-tagged result so the test can tell a
+# Landlock/seccomp denial apart from ECONNREFUSED or a routing failure.
+_CONNECT_PROBE = (
+    "import socket, sys\n"
+    "def probe(p):\n"
+    "    try:\n"
+    "        socket.create_connection(('127.0.0.1', p), timeout=5).close()\n"
+    "        return 'OK'\n"
+    "    except OSError as e:\n"
+    "        return 'ERR:%d' % (e.errno or 0)\n"
+    "print(' '.join(probe(int(a)) for a in sys.argv[1:]))\n"
+)
+
+
+def _open_listener():
+    """Open an unsandboxed loopback listener; return (socket, port)."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    return sock, sock.getsockname()[1]
+
+
+def _assert_denied(token: bytes):
+    """Assert a probe token reports a sandbox denial (EACCES/EPERM), not e.g.
+    ECONNREFUSED — which would let a removed-enforcement regression pass."""
+    assert token.startswith(b"ERR:"), f"expected a denial, got {token!r}"
+    code = int(token.split(b":")[1])
+    assert code in _DENIAL_ERRNOS, f"expected EACCES/EPERM denial, got errno {code}"
+
+
+@pytest.mark.skipif(
+    not _landlock_has_network(),
+    reason="per-port TCP filtering needs Landlock ABI V4+ (kernel >= 6.7)",
+)
+class TestSandboxedExecPortFiltering:
+    """allow_bind_port / allow_localhost_port / allow_tcp_connect_port (items 3, 8)."""
+
+    @pytest.fixture
+    def base_caps(self, temp_dir):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        return caps
+
+    def test_allow_bind_port_permits_listen(self, base_caps, temp_dir):
+        """A server may bind its allowed port while outbound stays blocked."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "s = socket.socket()\n"
+            "s.bind(('127.0.0.1', 8080))\n"
+            "s.listen(1)\n"
+            "print('BIND_OK')\n"
+        )
+        result = sandboxed_exec(
+            base_caps, [sys.executable, "-c", prog], cwd=str(temp_dir), timeout_secs=15.0
+        )
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.strip() == b"BIND_OK"
+
+    def test_bind_denied_on_other_port(self, base_caps, temp_dir):
+        """Binding a port that was not allowed fails with a sandbox denial."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "s = socket.socket()\n"
+            "try:\n"
+            "    s.bind(('127.0.0.1', 9090))\n"
+            "    s.listen(1)\n"
+            "    print('BIND_OK')\n"
+            "except OSError as e:\n"
+            "    print('ERR:%d' % (e.errno or 0))\n"
+        )
+        result = sandboxed_exec(
+            base_caps, [sys.executable, "-c", prog], cwd=str(temp_dir), timeout_secs=15.0
+        )
+        assert result.exit_code == 0, result.stderr
+        _assert_denied(result.stdout.strip())
+
+    def test_outbound_blocked_while_bind_allowed(self, base_caps, temp_dir):
+        """allow_bind_port does not open outbound egress.
+
+        Targets an unsandboxed loopback listener the child could otherwise
+        reach, and asserts a specific EACCES/EPERM denial — so a removed
+        enforcement would flip the result to a successful connect, not silently
+        pass on an ECONNREFUSED/timeout as the old 1.1.1.1 probe could.
+        """
+        listener, port = _open_listener()
+        try:
+            base_caps.block_network()
+            base_caps.allow_bind_port(8080)  # bind only; no connect grant
+            result = sandboxed_exec(
+                base_caps,
+                [sys.executable, "-c", _CONNECT_PROBE, str(port)],
+                cwd=str(temp_dir),
+                timeout_secs=15.0,
+            )
+            assert result.exit_code == 0, result.stderr
+            _assert_denied(result.stdout.strip())
+        finally:
+            listener.close()
+
+    def test_allow_localhost_port_connect(self, base_caps, temp_dir):
+        """A permitted localhost port is reachable; an unlisted one is denied."""
+        listener_ok, allowed_port = _open_listener()
+        listener_blocked, blocked_port = _open_listener()
+        try:
+            base_caps.block_network()
+            base_caps.allow_localhost_port(allowed_port)
+            result = sandboxed_exec(
+                base_caps,
+                [sys.executable, "-c", _CONNECT_PROBE, str(allowed_port), str(blocked_port)],
+                cwd=str(temp_dir),
+                timeout_secs=15.0,
+            )
+            assert result.exit_code == 0, result.stderr
+            allowed_tok, blocked_tok = result.stdout.split()
+            assert allowed_tok == b"OK"
+            _assert_denied(blocked_tok)
+        finally:
+            listener_ok.close()
+            listener_blocked.close()
+
+    def test_allow_tcp_connect_port_connect(self, base_caps, temp_dir):
+        """allow_tcp_connect_port permits only the listed port; others denied."""
+        listener_ok, allowed_port = _open_listener()
+        listener_blocked, blocked_port = _open_listener()
+        try:
+            base_caps.block_network()
+            base_caps.allow_tcp_connect_port(allowed_port)
+            result = sandboxed_exec(
+                base_caps,
+                [sys.executable, "-c", _CONNECT_PROBE, str(allowed_port), str(blocked_port)],
+                cwd=str(temp_dir),
+                timeout_secs=15.0,
+            )
+            assert result.exit_code == 0, result.stderr
+            allowed_tok, blocked_tok = result.stdout.split()
+            assert allowed_tok == b"OK"
+            _assert_denied(blocked_tok)
+        finally:
+            listener_ok.close()
+            listener_blocked.close()
+
+    def test_udp_egress_is_not_blocked(self, base_caps, temp_dir):
+        """KNOWN GAP: Landlock filters TCP only, so UDP egress is NOT blocked by
+        block_network()+allow_bind_port. Pins the current behaviour so a doc/impl
+        claiming "all egress blocked" cannot land unchallenged; update when the
+        crate gains UDP filtering."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            "try:\n"
+            "    s.sendto(b'x', ('1.1.1.1', 53))\n"
+            "    print('UDP_SENT')\n"
+            "except OSError as e:\n"
+            "    print('UDP_BLOCKED', e.errno)\n"
+        )
+        result = sandboxed_exec(
+            base_caps, [sys.executable, "-c", prog], cwd=str(temp_dir), timeout_secs=15.0
+        )
+        assert result.exit_code == 0, result.stderr
+        # Documents today's reality: UDP is not filtered by Landlock.
+        assert result.stdout.strip() == b"UDP_SENT"
+
+    def test_localhost_port_zero_fails_closed(self, base_caps, temp_dir):
+        """The port-0 localhost wildcard is rejected on Linux with block-net:
+        the sandbox fails closed at apply rather than granting a wildcard."""
+        base_caps.block_network()
+        base_caps.allow_localhost_port(0)
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "print('RAN')"],
+            cwd=str(temp_dir),
+            timeout_secs=15.0,
+        )
+        assert result.exit_code != 0
+        assert b"RAN" not in result.stdout
+
+
+@pytest.mark.skipif(
+    _landlock_has_network(),
+    reason="fail-closed path only exists on Landlock ABI < V4 (kernel < 6.7)",
+)
+class TestPortFilteringFailClosedPreV4:
+    """On kernels without Landlock net filtering (e.g. the 6.1 target), a port
+    allowlist combined with block_network() must fail closed at apply time, not
+    silently run unenforced. Skipped on V4+ where the crate seccomp fallback for
+    this is not yet implemented."""
+
+    @pytest.fixture
+    def base_caps(self, temp_dir):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        return caps
+
+    def test_block_plus_bind_port_fails_closed(self, base_caps, temp_dir):
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "print('RAN')"],
+            cwd=str(temp_dir),
+            timeout_secs=15.0,
+        )
+        # The child aborts before exec rather than running unenforced.
+        assert result.exit_code != 0
+        assert b"RAN" not in result.stdout
+        assert b"sandbox apply failed" in result.stderr
+
+
+class TestCapabilitySetPortMethods:
+    """The port methods are callable regardless of kernel enforcement support."""
+
+    def test_methods_exist_and_accept_ports(self):
+        caps = CapabilitySet()
+        caps.block_network()
+        caps.allow_localhost_port(5000)
+        caps.allow_tcp_connect_port(443)
+        caps.allow_bind_port(8080)
+        # summary should render without error
+        assert isinstance(caps.summary(), str)
+
+    @pytest.mark.parametrize(
+        "setup",
+        [
+            lambda c: c.allow_localhost_port(5000),
+            lambda c: c.allow_tcp_connect_port(443),
+            lambda c: c.allow_bind_port(8080),
+        ],
+    )
+    def test_sandboxstate_rejects_port_allowlists(self, setup):
+        """SandboxState cannot serialize per-port allowlists, so from_caps fails
+        closed (raises) rather than silently dropping them — which, in allow-all
+        mode, would widen the restored sandbox to fully open. Guards against that
+        silent widening until the crate serializes the port vectors."""
+        caps = CapabilitySet()
+        caps.block_network()
+        setup(caps)
+        with pytest.raises(ValueError, match="per-port TCP allowlist"):
+            SandboxState.from_caps(caps)
+
+    def test_sandboxstate_still_works_without_port_rules(self):
+        """A capability set with no port allowlist round-trips as before."""
+        caps = CapabilitySet()
+        caps.block_network()
+        restored = SandboxState.from_json(SandboxState.from_caps(caps).to_json()).to_caps()
+        assert restored.is_network_blocked
