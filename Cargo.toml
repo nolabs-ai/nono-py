@@ -10,7 +10,9 @@ publish = false
 
 [lib]
 name = "_nono_py"
-crate-type = ["cdylib"]
+# cdylib: the Python extension module maturin ships. rlib: lets `cargo test`
+# build a test harness for the crate's #[cfg(test)] unit tests.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nono = "0.67.0"

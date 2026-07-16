@@ -490,6 +490,8 @@ def sandboxed_exec(
     max_cpu_seconds: int | None = None,
     max_file_size_bytes: int | None = None,
     max_open_files: int | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
     enforcement_mode: str = "auto",
 ) -> ExecResult:
     """Execute a command in a sandboxed child process.
@@ -518,6 +520,14 @@ def sandboxed_exec(
             write to any single file). A write past the limit fails with EFBIG
             and raises SIGXFSZ, which terminates the child if unhandled.
         max_open_files: Optional RLIMIT_NOFILE value (max open file descriptors).
+        uid: Optional real+effective UID to drop the child to before exec.
+            Requires the calling process to be privileged (root or CAP_SETUID).
+            A distinct UID makes the kernel reject the child's kill() against
+            the same-UID parent with EPERM. Must be non-zero.
+        gid: Optional real+effective GID to drop the child to before exec.
+            Applied before uid; supplementary groups are cleared. Requires
+            privilege. If uid is set and gid is omitted, gid defaults to uid so
+            the child does not retain the parent's group. Must be non-zero.
         enforcement_mode: OS mechanism to apply: "auto" (default), "landlock",
             or "seccomp". "landlock"/"seccomp" are Linux-only.
 
@@ -527,8 +537,8 @@ def sandboxed_exec(
     Raises:
         RuntimeError: If fork fails or command cannot be executed
         ValueError: If command is empty, timeout is negative,
-            max_processes/max_cpu_seconds/max_open_files is zero, or
-            enforcement_mode is invalid
+            max_processes/max_cpu_seconds/max_open_files is zero, uid/gid is zero
+            or set on an unsupported platform, or enforcement_mode is invalid
     """
     ...
 

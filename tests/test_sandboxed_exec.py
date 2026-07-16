@@ -1,8 +1,12 @@
 """Tests for sandboxed_exec function."""
 
+import contextlib
 import errno
 import os
+import pwd
+import shutil
 import signal
+import subprocess
 import sys
 import time
 
@@ -32,6 +36,116 @@ def clear_dangerous_loader_env(monkeypatch):
     for key in list(os.environ):
         if key.startswith(("LD_", "DYLD_")) or key in {"LIBPATH", "SHLIB_PATH"}:
             monkeypatch.delenv(key, raising=False)
+
+
+# --- Unprivileged privilege-drop testing via user namespaces ----------------
+#
+# A real uid/gid drop needs privilege, so these behaviours used to be testable
+# only as root. But an unprivileged user namespace that maps a subuid/subgid
+# range lets us drive the genuine drop path in ordinary CI: inside the namespace
+# the caller becomes "root" (mapped to the real user) and can hand the child a
+# distinct uid taken from the mapped range. Two rules make it work:
+#   * the namespace parent runs the CURRENT interpreter (sys.executable) so it
+#     can still import nono_py from the venv, and
+#   * the dropped child must exec a WORLD-READABLE system binary — the venv
+#     interpreter lives under $HOME and is unreadable once the uid is dropped.
+
+_CHILD_PY = "/usr/bin/python3"  # world-readable; safe to exec as the dropped uid
+_DROP_ID = 4000  # distinct from both inner-root (0) and the real caller uid
+_UNSHARE = shutil.which("unshare")
+
+
+def _subid_range(path: str, name: str, numeric_id: int) -> tuple[int, int] | None:
+    """Parse an /etc/subuid|subgid line for this user; return (start, count)."""
+    with contextlib.suppress(OSError), open(path) as f:
+        for line in f:
+            owner, _, rest = line.strip().partition(":")
+            start_s, _, count_s = rest.partition(":")
+            if owner in (name, str(numeric_id)) and start_s and count_s:
+                return int(start_s), int(count_s)
+    return None
+
+
+def _userns_map_args() -> list[str] | None:
+    """Build unshare args mapping inner-0 -> caller and a subid range -> inner 1.., or None."""
+    uid, gid = os.getuid(), os.getgid()
+    name = pwd.getpwuid(uid).pw_name
+    su = _subid_range("/etc/subuid", name, uid)
+    sg = _subid_range("/etc/subgid", name, gid)
+    if su is None or sg is None:
+        return None
+    (su_start, su_count), (sg_start, sg_count) = su, sg
+    # The drop target must fall inside the mapped range (inner ids 1..count-1).
+    if su_count <= _DROP_ID or sg_count <= _DROP_ID:
+        return None
+    return [
+        "--user",
+        f"--map-users=0:{uid}:1",
+        f"--map-users=1:{su_start}:{su_count - 1}",
+        f"--map-groups=0:{gid}:1",
+        f"--map-groups=1:{sg_start}:{sg_count - 1}",
+    ]
+
+
+def _run_in_userns(script: str) -> subprocess.CompletedProcess:
+    """Run `script` with the current interpreter inside a range-mapped user namespace."""
+    args = _userns_map_args()
+    assert _UNSHARE is not None and args is not None  # gated by the skipif below
+    env = dict(os.environ, NONO_DROP_ID=str(_DROP_ID), NONO_CHILD_PY=_CHILD_PY)
+    return subprocess.run(  # noqa: S603
+        [_UNSHARE, *args, sys.executable, "-c", script],
+        capture_output=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+
+
+def _can_drop_in_userns() -> bool:
+    """True if this host can really drop to a non-zero uid/gid in an unprivileged userns."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if _UNSHARE is None or not os.path.exists(_CHILD_PY):
+        return False
+    args = _userns_map_args()
+    if args is None:
+        return False
+    probe = f"import os; os.setgroups([]); os.setgid({_DROP_ID}); os.setuid({_DROP_ID})"
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [_UNSHARE, *args, _CHILD_PY, "-c", probe],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+# Evaluated once at collection time; cheap and side-effect-free.
+_CAN_DROP_IN_USERNS = _can_drop_in_userns()
+
+# Shared setup for the in-userns child scripts: build a CapabilitySet that lets a
+# world-readable system python run, plus a world-enterable working directory.
+_USERNS_PRELUDE = """
+import os, sys, tempfile
+from nono_py import AccessMode, CapabilitySet, sandboxed_exec
+
+DROP_ID = int(os.environ["NONO_DROP_ID"])
+CHILD_PY = os.environ["NONO_CHILD_PY"]
+
+work = tempfile.mkdtemp()
+os.chmod(work, 0o777)  # the dropped uid must be able to enter its cwd
+caps = CapabilitySet()
+for _p in ("/usr", "/bin", "/lib", "/lib64", "/etc", "/proc", "/dev"):
+    if os.path.exists(_p):
+        try:
+            caps.allow_path(_p, AccessMode.READ)
+        except Exception:
+            pass
+caps.allow_path(work, AccessMode.READ_WRITE)
+"""
 
 
 class TestExecResult:
@@ -450,6 +564,142 @@ class TestSandboxedExecResourceLimits:
     def test_zero_max_open_files_raises(self, base_caps, temp_dir):
         with pytest.raises(ValueError, match="max_open_files must be positive"):
             sandboxed_exec(base_caps, ["echo", "hi"], cwd=str(temp_dir), max_open_files=0)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="uid/gid drop is exercised on Linux here",
+)
+class TestSandboxedExecPrivilegeDrop:
+    """uid=/gid= drop the child to a distinct identity (TS30 mitigation)."""
+
+    @pytest.fixture
+    def base_caps(self, temp_dir):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        return caps
+
+    def test_uid_drop_requires_privilege(self, base_caps, temp_dir):
+        """Unprivileged callers cannot drop to another uid: fail closed (126)."""
+        if os.getuid() == 0:
+            pytest.skip("running as root; see test_uid_drop_as_root")
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "import os; print(os.getuid())"],
+            cwd=str(temp_dir),
+            uid=12345,
+            gid=12345,
+        )
+        assert result.exit_code == 126
+        assert b"drop privileges" in result.stderr
+
+    def test_uid_drop_as_root(self, base_caps, temp_dir):
+        """A privileged caller drops the child to the requested uid/gid."""
+        if os.getuid() != 0:
+            pytest.skip("requires root")
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "import os; print(f'{os.getuid()},{os.getgid()}')"],
+            cwd=str(temp_dir),
+            uid=4000,
+            gid=4000,
+        )
+        assert result.exit_code == 0
+        assert result.stdout.strip() == b"4000,4000"
+
+    def test_zero_uid_rejected(self, base_caps, temp_dir):
+        """uid=0 is a no-op drop and almost certainly a mistake: rejected."""
+        with pytest.raises(ValueError, match="uid must be non-zero"):
+            sandboxed_exec(base_caps, ["echo", "hi"], cwd=str(temp_dir), uid=0)
+
+    def test_zero_gid_rejected(self, base_caps, temp_dir):
+        """gid=0 is a no-op drop and almost certainly a mistake: rejected."""
+        with pytest.raises(ValueError, match="gid must be non-zero"):
+            sandboxed_exec(base_caps, ["echo", "hi"], cwd=str(temp_dir), gid=0)
+
+    def test_uid_without_gid_defaults_gid_to_uid(self, base_caps, temp_dir):
+        """uid without gid must not retain the parent's gid: gid defaults to uid."""
+        if os.getuid() != 0:
+            pytest.skip("requires root")
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", "import os; print(f'{os.getuid()},{os.getgid()}')"],
+            cwd=str(temp_dir),
+            uid=4000,
+        )
+        assert result.exit_code == 0
+        assert result.stdout.strip() == b"4000,4000"
+
+
+@pytest.mark.skipif(
+    not _CAN_DROP_IN_USERNS,
+    reason="needs an unprivileged user namespace able to map a subuid/subgid range",
+)
+class TestSandboxedExecPrivilegeDropUnprivileged:
+    """Exercise a REAL privilege drop without root, inside a range-mapped user namespace.
+
+    See the _run_in_userns helper above for how the namespace is set up. Each
+    embedded child program runs as the dropped uid and asserts the security
+    properties the drop is meant to guarantee — the assertions no existing test
+    reaches, because they need a genuine drop rather than a matching-getuid check.
+    """
+
+    def test_real_drop_blocks_signals_and_climb_back(self):
+        """Distinct uid: the child cannot signal its parent and cannot climb back to root."""
+        script = (
+            _USERNS_PRELUDE
+            + """
+prog = "\\n".join([
+    "import os, sys",
+    "assert os.getuid() == %d, ('uid not dropped', os.getuid())" % DROP_ID,
+    # The parent is inner-root (uid 0); a distinct-uid child must not be able to
+    # signal it — this is the child->parent signal vector the feature closes.
+    "try:",
+    "    os.kill(os.getppid(), 0); print('SIGNAL_ALLOWED'); sys.exit(3)",
+    "except PermissionError:",
+    "    pass",
+    # The saved-set-uid must be gone: the child cannot regain the parent's uid.
+    "try:",
+    "    os.setuid(0); print('CLIMBED_BACK'); sys.exit(4)",
+    "except PermissionError:",
+    "    pass",
+    "print('CHILD_OK')",
+])
+r = sandboxed_exec(caps, [CHILD_PY, "-c", prog], cwd=work, uid=DROP_ID)
+if r.exit_code != 0 or r.stdout.strip() != b"CHILD_OK":
+    sys.stderr.write("PARENT_FAIL exit=%r out=%r err=%r" % (r.exit_code, r.stdout, r.stderr))
+    sys.exit(1)
+print("PARENT_OK")
+"""
+        )
+        proc = _run_in_userns(script)
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        assert b"PARENT_OK" in proc.stdout
+
+    def test_gid_defaults_to_uid_and_supp_groups_cleared(self):
+        """uid without gid: gid defaults to uid, and supplementary groups are cleared."""
+        script = (
+            _USERNS_PRELUDE
+            + """
+prog = "\\n".join([
+    "import os",
+    "assert os.getuid() == %d, ('uid not dropped', os.getuid())" % DROP_ID,
+    "assert os.getgid() == %d, ('gid not defaulted to uid', os.getgid())" % DROP_ID,
+    "assert set(os.getgroups()) - {%d} == set(), ('supp groups not cleared', os.getgroups())"
+    % DROP_ID,
+    "print('CHILD_OK')",
+])
+r = sandboxed_exec(caps, [CHILD_PY, "-c", prog], cwd=work, uid=DROP_ID)  # gid omitted
+if r.exit_code != 0 or r.stdout.strip() != b"CHILD_OK":
+    sys.stderr.write("PARENT_FAIL exit=%r out=%r err=%r" % (r.exit_code, r.stdout, r.stderr))
+    sys.exit(1)
+print("PARENT_OK")
+"""
+        )
+        proc = _run_in_userns(script)
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        assert b"PARENT_OK" in proc.stdout
 
 
 class TestSandboxedExecEnforcementMode:
