@@ -1282,13 +1282,31 @@ fn parent_process(
         read_pipe_until_eof_or_cancel(stderr_read, stderr_cancel).unwrap_or_default()
     });
 
-    let exit_code = wait_for_child(
+    let exit_code = match wait_for_child(
         child_pid,
         ctx.timeout_secs,
         &cancel_readers,
         #[cfg(target_os = "linux")]
         proxy_supervisor.as_mut(),
-    )?;
+    ) {
+        Ok(code) => code,
+        Err(e) => {
+            // wait_for_child bailed before reaping (e.g. a proxy notify-fd
+            // handshake failure). Kill and reap the child so it does not
+            // linger as a zombie, and unblock+join the reader threads, before
+            // propagating the error.
+            cancel_readers.store(true, Ordering::Relaxed);
+            // SAFETY: valid child pid; kill the group then reap the child.
+            unsafe {
+                kill_process_group_or_child(child_pid);
+                let mut status: i32 = 0;
+                libc::waitpid(child_pid, &mut status, 0);
+            }
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Err(e);
+        }
+    };
 
     let stdout_buf = stdout_handle.join().unwrap_or_default();
     let stderr_buf = stderr_handle.join().unwrap_or_default();
@@ -1512,10 +1530,22 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
                 // Drop the socket so the child's ack read sees EOF and it
                 // fails closed instead of waiting forever.
                 supervisor.sock = None;
+                // EPERM here almost always means a container seccomp profile
+                // that gates pidfd_getfd behind CAP_SYS_PTRACE (the Docker /
+                // containerd / ECS default). Point the operator at the real
+                // remedies instead of a bare errno.
+                let hint = if e.raw_os_error() == Some(libc::EPERM) {
+                    " — pidfd_getfd is blocked by the container seccomp profile. \
+                     proxy_only() on this (pre-Landlock-V4) kernel needs one of: \
+                     add CAP_SYS_PTRACE, run on kernel >= 6.7 (Landlock network \
+                     enforcement, no seccomp fallback), or use block_network() \
+                     instead of proxy_only()"
+                } else {
+                    " — requires kernel >= 5.6 and ptrace access to the child"
+                };
                 return Err(PyRuntimeError::new_err(format!(
-                    "pidfd_getfd on proxy notify fd failed (kernel >= 5.6 and \
-                     ptrace access to the child required): {}",
-                    e
+                    "proxy-only notify fd handoff failed (pidfd_getfd): {}{}",
+                    e, hint
                 )));
             }
         }
@@ -1532,8 +1562,14 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
 /// Clone a file descriptor out of the child process via pidfd_getfd(2).
 ///
 /// Requires kernel >= 5.6 and PTRACE_MODE_ATTACH_REALCREDS permission over
-/// the child (a direct parent has this under default Yama settings; the
-/// uid/gid-drop path implies a privileged parent, which also has it).
+/// the child (a direct parent has this under default Yama settings).
+///
+/// Caveat: a container seccomp profile can still block the pidfd_getfd
+/// syscall itself even when ptrace permission is granted. The Docker /
+/// containerd / ECS default profile allows pidfd_getfd only with
+/// CAP_SYS_PTRACE, so proxy_only() over the seccomp fallback (pre-Landlock-V4
+/// kernels) returns EPERM there. This mirrors nono's own CLI supervisor,
+/// which uses the same pidfd_getfd handoff.
 #[cfg(target_os = "linux")]
 fn clone_fd_from_child(child_pid: i32, remote_fd: i32) -> IoResult<OwnedFd> {
     // SAFETY: pidfd_open has no libc wrapper; arguments are a valid pid and
