@@ -217,6 +217,7 @@ struct ProxySupervisor {
     sock: Option<nono::SupervisorSocket>,
     notify_fd: Option<OwnedFd>,
     policy: ProxyOnlyPolicy,
+    child_pid: i32,
 }
 
 /// Execute a command in a sandboxed child process.
@@ -400,6 +401,12 @@ pub fn sandboxed_exec(
 
     #[cfg(target_os = "linux")]
     let proxy_supervisor_pair = create_proxy_supervisor_pair(&ctx)?;
+
+    // Warm the Landlock ABI cache while allocation is still safe: detect_abi
+    // caches in a OnceLock, so probing here makes the child's post-fork call
+    // a plain cache read instead of kernel probes plus allocation.
+    #[cfg(target_os = "linux")]
+    let _ = nono::Sandbox::detect_abi();
 
     // Create pipes for stdout and stderr
     let stdout_pipe = create_pipe()?;
@@ -701,9 +708,12 @@ fn do_fork_sandbox_exec(
         .chain(std::iter::once(std::ptr::null()))
         .collect();
 
-    // SAFETY: fork() creates a child process. We validated threading
-    // context above. Sandbox::apply() allocates in the child, which is
-    // safe because only the forking thread continues after fork.
+    // SAFETY: fork() creates a child process. Only the forking thread
+    // continues in the child, so any lock held by another parent thread at
+    // fork time (e.g. a malloc arena lock) stays held forever in the child.
+    // The thread-count guard above bounds the exposure but cannot remove it;
+    // the child path therefore keeps allocation to a minimum (ABI detection
+    // is pre-warmed in the parent) though Sandbox apply is not allocation-free.
     let pid = unsafe { libc::fork() };
 
     if pid < 0 {
@@ -905,8 +915,80 @@ fn install_proxy_fallback_if_needed(
 
     let notify_fd =
         nono::sandbox::install_seccomp_proxy_filter(has_bind_ports).map_err(|e| e.to_string())?;
-    nono::supervisor::socket::send_fd_via_socket(sock_fd, notify_fd.as_raw_fd())
-        .map_err(|e| e.to_string())
+
+    // The filter just installed traps sendmsg(), so the notify fd cannot be
+    // transferred with SCM_RIGHTS: that sendmsg would itself block on the
+    // not-yet-serviced notify fd. Instead, write the raw fd *number* with
+    // plain write(2) (not trapped) and let the parent clone the fd out of
+    // this process with pidfd_getfd(2).
+    let fd_bytes = notify_fd.as_raw_fd().to_ne_bytes();
+    write_all_raw(sock_fd, &fd_bytes).map_err(|e| format!("notify fd handoff write: {}", e))?;
+
+    // Hold the notify fd open until the parent confirms it has cloned it;
+    // exec/close before that would tear the listener down (trapped syscalls
+    // would fail with ENOSYS instead of being mediated). EOF means the
+    // parent went away or gave up — fail closed.
+    let mut ack = [0u8; 1];
+    read_exact_raw(sock_fd, &mut ack).map_err(|e| format!("notify fd handoff ack: {}", e))?;
+
+    Ok(())
+}
+
+/// write(2) a full buffer to a raw fd, retrying on EINTR/partial writes.
+#[cfg(target_os = "linux")]
+fn write_all_raw(fd: i32, buf: &[u8]) -> IoResult<()> {
+    let mut written = 0;
+    while written < buf.len() {
+        // SAFETY: fd is a valid open socket; the pointer/len describe `buf`.
+        let n = unsafe {
+            libc::write(
+                fd,
+                buf[written..].as_ptr().cast::<libc::c_void>(),
+                buf.len() - written,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        written += n as usize;
+    }
+    Ok(())
+}
+
+/// read(2) an exact number of bytes from a raw fd, retrying on EINTR.
+/// Returns an error on EOF (peer closed).
+#[cfg(target_os = "linux")]
+fn read_exact_raw(fd: i32, buf: &mut [u8]) -> IoResult<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        // SAFETY: fd is a valid open socket; the pointer/len describe `buf`.
+        let n = unsafe {
+            libc::read(
+                fd,
+                buf[filled..].as_mut_ptr().cast::<libc::c_void>(),
+                buf.len() - filled,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "peer closed during notify fd handoff",
+            ));
+        }
+        filled += n as usize;
+    }
+    Ok(())
 }
 
 /// Close every inherited fd except stdin/stdout/stderr in the forked child.
@@ -1176,7 +1258,8 @@ fn parent_process(
     }
 
     #[cfg(target_os = "linux")]
-    let mut proxy_supervisor = create_proxy_supervisor(proxy_supervisor_pair, proxy_policy);
+    let mut proxy_supervisor =
+        create_proxy_supervisor(proxy_supervisor_pair, proxy_policy, child_pid);
 
     // Capture read fds before spawning threads (moved into closures)
     let stdout_read = stdout_pipe.read_fd;
@@ -1199,13 +1282,31 @@ fn parent_process(
         read_pipe_until_eof_or_cancel(stderr_read, stderr_cancel).unwrap_or_default()
     });
 
-    let exit_code = wait_for_child(
+    let exit_code = match wait_for_child(
         child_pid,
         ctx.timeout_secs,
         &cancel_readers,
         #[cfg(target_os = "linux")]
         proxy_supervisor.as_mut(),
-    )?;
+    ) {
+        Ok(code) => code,
+        Err(e) => {
+            // wait_for_child bailed before reaping (e.g. a proxy notify-fd
+            // handshake failure). Kill and reap the child so it does not
+            // linger as a zombie, and unblock+join the reader threads, before
+            // propagating the error.
+            cancel_readers.store(true, Ordering::Relaxed);
+            // SAFETY: valid child pid; kill the group then reap the child.
+            unsafe {
+                kill_process_group_or_child(child_pid);
+                let mut status: i32 = 0;
+                libc::waitpid(child_pid, &mut status, 0);
+            }
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Err(e);
+        }
+    };
 
     let stdout_buf = stdout_handle.join().unwrap_or_default();
     let stderr_buf = stderr_handle.join().unwrap_or_default();
@@ -1228,6 +1329,7 @@ fn parent_process(
 fn create_proxy_supervisor(
     proxy_supervisor_pair: Option<(nono::SupervisorSocket, nono::SupervisorSocket)>,
     proxy_policy: Option<ProxyOnlyPolicy>,
+    child_pid: i32,
 ) -> Option<ProxySupervisor> {
     let (supervisor_sock, child_sock) = proxy_supervisor_pair?;
     drop(child_sock);
@@ -1235,6 +1337,7 @@ fn create_proxy_supervisor(
         sock: Some(supervisor_sock),
         notify_fd: None,
         policy: proxy_policy?,
+        child_pid,
     })
 }
 
@@ -1248,6 +1351,15 @@ fn wait_for_child(
 ) -> PyResult<i32> {
     let deadline = timeout_secs.map(|t| Instant::now() + Duration::from_secs_f64(t));
 
+    // A blocking waitpid() would starve the proxy notify fd: the child's
+    // first trapped syscall (and the notify fd handshake itself) would then
+    // wedge forever. Poll whenever there is a supervisor to service, not
+    // only when a timeout deadline exists.
+    #[cfg(target_os = "linux")]
+    let must_poll = deadline.is_some() || proxy_supervisor.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let must_poll = deadline.is_some();
+
     loop {
         #[cfg(target_os = "linux")]
         service_proxy_supervisor(proxy_supervisor.as_deref_mut())?;
@@ -1258,7 +1370,7 @@ fn wait_for_child(
             libc::waitpid(
                 child_pid,
                 &mut status,
-                if deadline.is_some() { libc::WNOHANG } else { 0 },
+                if must_poll { libc::WNOHANG } else { 0 },
             )
         };
 
@@ -1388,8 +1500,55 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
     }
 
     if pfd.revents & libc::POLLIN != 0 {
-        supervisor.notify_fd = sock.recv_fd().ok();
-        supervisor.sock = None;
+        // The child writes the notify fd *number* with plain write(2)
+        // (SCM_RIGHTS would be trapped by the proxy filter it just
+        // installed). Clone the actual fd out of the child, then ack so the
+        // child knows it can drop its copy and exec.
+        let remote_fd = match sock.recv_raw_fd_number() {
+            Ok(fd) => fd,
+            Err(_) => {
+                supervisor.sock = None;
+                return Ok(());
+            }
+        };
+
+        match clone_fd_from_child(supervisor.child_pid, remote_fd) {
+            Ok(local_fd) => {
+                supervisor.notify_fd = Some(local_fd);
+                let ack = [1u8];
+                // SAFETY: sock is a valid open socketpair fd; 1-byte write.
+                let ret = unsafe { libc::write(sock.as_raw_fd(), ack.as_ptr().cast(), 1) };
+                supervisor.sock = None;
+                if ret != 1 {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "proxy supervisor handshake ack failed: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+            }
+            Err(e) => {
+                // Drop the socket so the child's ack read sees EOF and it
+                // fails closed instead of waiting forever.
+                supervisor.sock = None;
+                // EPERM here almost always means a container seccomp profile
+                // that gates pidfd_getfd behind CAP_SYS_PTRACE (the Docker /
+                // containerd / ECS default). Point the operator at the real
+                // remedies instead of a bare errno.
+                let hint = if e.raw_os_error() == Some(libc::EPERM) {
+                    " — pidfd_getfd is blocked by the container seccomp profile. \
+                     proxy_only() on this (pre-Landlock-V4) kernel needs one of: \
+                     add CAP_SYS_PTRACE, run on kernel >= 6.7 (Landlock network \
+                     enforcement, no seccomp fallback), or use block_network() \
+                     instead of proxy_only()"
+                } else {
+                    " — requires kernel >= 5.6 and ptrace access to the child"
+                };
+                return Err(PyRuntimeError::new_err(format!(
+                    "proxy-only notify fd handoff failed (pidfd_getfd): {}{}",
+                    e, hint
+                )));
+            }
+        }
         return Ok(());
     }
 
@@ -1400,37 +1559,124 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
     Ok(())
 }
 
+/// Clone a file descriptor out of the child process via pidfd_getfd(2).
+///
+/// Requires kernel >= 5.6 and PTRACE_MODE_ATTACH_REALCREDS permission over
+/// the child (a direct parent has this under default Yama settings).
+///
+/// Caveat: a container seccomp profile can still block the pidfd_getfd
+/// syscall itself even when ptrace permission is granted. The Docker /
+/// containerd / ECS default profile allows pidfd_getfd only with
+/// CAP_SYS_PTRACE, so proxy_only() over the seccomp fallback (pre-Landlock-V4
+/// kernels) returns EPERM there. This mirrors nono's own CLI supervisor,
+/// which uses the same pidfd_getfd handoff.
+#[cfg(target_os = "linux")]
+fn clone_fd_from_child(child_pid: i32, remote_fd: i32) -> IoResult<OwnedFd> {
+    // SAFETY: pidfd_open has no libc wrapper; arguments are a valid pid and
+    // zero flags. On success it returns a new pidfd owned by us.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid, 0u32) };
+    if pidfd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let pidfd = pidfd as i32;
+
+    // SAFETY: pidfd_getfd duplicates remote_fd from the target into our fd
+    // table; zero flags. The returned fd (if >= 0) is owned by us.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd, remote_fd, 0u32) };
+    let getfd_err = std::io::Error::last_os_error();
+    // SAFETY: pidfd is a valid fd we own; closing it does not affect the child.
+    unsafe {
+        libc::close(pidfd);
+    }
+    if fd < 0 {
+        return Err(getfd_err);
+    }
+    // SAFETY: fd is a fresh descriptor returned by pidfd_getfd, owned by us.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
 #[cfg(target_os = "linux")]
 fn handle_proxy_notification(notify_fd: i32, policy: &ProxyOnlyPolicy) -> PyResult<()> {
     use nono::sandbox::{
-        SYS_BIND, SYS_CONNECT, continue_notif, deny_notif, notif_id_valid, read_notif_sockaddr,
-        recv_notif, respond_notif_errno,
+        SYS_BIND, SYS_CONNECT, SYS_SENDMMSG, SYS_SENDMSG, SYS_SENDTO, continue_notif, deny_notif,
+        notif_id_valid, recv_notif, respond_notif_errno,
     };
 
     let notif = recv_notif(notify_fd).map_err(proxy_supervisor_err)?;
-    let sockaddr = match read_notif_sockaddr(notif.pid, notif.data.args[1], notif.data.args[2]) {
-        Ok(info) => info,
-        Err(_) => {
-            let _ = deny_notif(notify_fd, notif.id);
-            return Ok(());
+    let pid = notif.pid;
+    let args = notif.data.args;
+
+    // Destination-less sends (NULL sockaddr) go to a peer the socket is
+    // already connected to; that connect() was itself mediated, so they are
+    // allowed. Everything else must name the proxy (or an allowed bind port).
+    let allow = match notif.data.nr {
+        SYS_CONNECT => sockaddr_allowed(pid, args[1], args[2], policy, false),
+        SYS_BIND => sockaddr_allowed(pid, args[1], args[2], policy, true),
+        // sendto(fd, buf, len, flags, dest_addr, addrlen)
+        SYS_SENDTO => {
+            if args[4] == 0 || args[5] == 0 {
+                Some(true)
+            } else {
+                sockaddr_allowed(pid, args[4], args[5], policy, false)
+            }
         }
+        // sendmsg(fd, msghdr*, flags): destination is msghdr.msg_name
+        SYS_SENDMSG => match nono::sandbox::read_msghdr_dest(pid, args[1]) {
+            Ok(None) => Some(true),
+            Ok(Some((addr_ptr, addrlen))) => {
+                sockaddr_allowed(pid, addr_ptr, addrlen, policy, false)
+            }
+            Err(_) => None,
+        },
+        // sendmmsg(fd, msgvec, vlen, flags): every message may carry its own
+        // destination; all of them must be allowed.
+        SYS_SENDMMSG => match nono::sandbox::read_mmsghdr_dests(pid, args[1], args[2]) {
+            Ok(dests) => dests.into_iter().try_fold(true, |acc, dest| match dest {
+                None => Some(acc),
+                Some((addr_ptr, addrlen)) => {
+                    sockaddr_allowed(pid, addr_ptr, addrlen, policy, false).map(|a| acc && a)
+                }
+            }),
+            Err(_) => None,
+        },
+        _ => Some(false),
+    };
+
+    // A parse failure means the child's memory could not be read coherently;
+    // deny without classifying.
+    let Some(allow) = allow else {
+        let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
     };
 
     if !notif_id_valid(notify_fd, notif.id).map_err(proxy_supervisor_err)? {
         return Ok(());
     }
 
-    let allow = match notif.data.nr {
-        SYS_CONNECT => sockaddr.is_loopback && sockaddr.port == policy.proxy_port,
-        SYS_BIND => policy.bind_ports.contains(&sockaddr.port),
-        _ => false,
-    };
-
     if allow {
         continue_notif(notify_fd, notif.id).map_err(proxy_supervisor_err)
     } else {
         respond_notif_errno(notify_fd, notif.id, libc::EACCES).map_err(proxy_supervisor_err)
     }
+}
+
+/// Read a sockaddr from the child's memory and evaluate it against the
+/// proxy-only policy. `for_bind` selects the bind-port allowlist instead of
+/// the proxy destination check. Returns `None` if the sockaddr cannot be read.
+#[cfg(target_os = "linux")]
+fn sockaddr_allowed(
+    pid: u32,
+    addr_ptr: u64,
+    addrlen: u64,
+    policy: &ProxyOnlyPolicy,
+    for_bind: bool,
+) -> Option<bool> {
+    let sockaddr = nono::sandbox::read_notif_sockaddr(pid, addr_ptr, addrlen).ok()?;
+    Some(if for_bind {
+        policy.bind_ports.contains(&sockaddr.port)
+    } else {
+        sockaddr.is_loopback && sockaddr.port == policy.proxy_port
+    })
 }
 
 #[cfg(target_os = "linux")]
