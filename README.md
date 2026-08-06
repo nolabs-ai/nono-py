@@ -117,6 +117,28 @@ with `EAGAIN` because the user already owns more than eight processes; it does
 not provide a reliable per-sandbox fork limit. Use cgroup `pids.max` or a
 dedicated container/microVM boundary for strong per-execution fork containment.
 
+On Linux kernels before 6.7, `proxy_only()` uses a seccomp notification
+supervisor. The default listener handoff works under the unmodified
+Docker/containerd and AWS Fargate seccomp profile with all capabilities dropped;
+it does not require `CAP_SYS_PTRACE`, a privileged container, or a custom
+profile. `NONO_PY_PROXY_HANDOFF=pidfd` temporarily selects the one-release
+legacy rollback path. That legacy path may require a custom profile allowing
+only `pidfd_getfd` on ECS-EC2/EKS and is not suitable for Fargate.
+
+For one compatibility release, `sandboxed_exec(..., enforcement_mode="auto")`
+retains the Landlock-first network behavior. Pass `enforcement_mode="seccomp"`
+to layer a static seccomp baseline under Landlock: plain `block_network()`
+denies non-Unix sockets, and policies with TCP port exceptions deny UDP,
+raw/non-IP sockets, and `io_uring_setup()`. The io_uring denial also affects
+programs using it only for file I/O. A future release will promote this
+baseline into Python's `"auto"` mode; `"landlock"` remains the explicit
+Landlock-only selection.
+
+Unix-domain socket grants are trusted IPC channels. nono-py scrubs inherited
+descriptors before exec, but an allowed Unix peer can deliberately pass an
+already-connected Internet socket with `SCM_RIGHTS`; creation-time seccomp and
+Landlock connect/bind rules cannot retroactively restrict that descriptor.
+
 ### Network Proxy
 
 Domain-filtered network access for sandboxed children. The proxy intercepts

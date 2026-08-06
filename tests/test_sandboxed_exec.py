@@ -782,6 +782,43 @@ class TestSandboxedExecEnforcementMode:
             )
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="seccomp is Linux-only")
+class TestSandboxedExecSeccompBaseline:
+    """Explicit seccomp mode opts into the staged static network baseline."""
+
+    @pytest.fixture
+    def base_caps(self, temp_dir):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        return caps
+
+    def test_plain_block_denies_udp_and_io_uring(self, base_caps, temp_dir):
+        base_caps.block_network()
+        prog = (
+            "import ctypes, socket\n"
+            "try:\n"
+            "    socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            "    print('UDP_OPEN')\n"
+            "except OSError as e:\n"
+            "    print('UDP_BLOCKED', e.errno)\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "result = libc.syscall(425, 1, None)\n"
+            "print('IO_URING', result, ctypes.get_errno())\n"
+        )
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", prog],
+            cwd=str(temp_dir),
+            timeout_secs=15.0,
+            enforcement_mode="seccomp",
+        )
+        assert result.exit_code == 0, result.stderr
+        assert b"UDP_BLOCKED 1" in result.stdout
+        assert b"UDP_OPEN" not in result.stdout
+        assert b"IO_URING -1 1" in result.stdout
+
+
 def _landlock_has_network() -> bool:
     """True if the running kernel enforces Landlock TCP port rules (ABI V4+)."""
     import nono_py
@@ -965,6 +1002,28 @@ class TestSandboxedExecPortFiltering:
         assert result.exit_code == 0, result.stderr
         # Documents today's reality: UDP is not filtered by Landlock.
         assert result.stdout.strip() == b"UDP_SENT"
+
+    def test_seccomp_mode_blocks_udp_with_port_exceptions(self, base_caps, temp_dir):
+        """Explicit seccomp mode closes the compatibility-mode UDP gap."""
+        base_caps.block_network()
+        base_caps.allow_bind_port(8080)
+        prog = (
+            "import socket\n"
+            "try:\n"
+            "    socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            "    print('UDP_OPEN')\n"
+            "except OSError as e:\n"
+            "    print('UDP_BLOCKED', e.errno)\n"
+        )
+        result = sandboxed_exec(
+            base_caps,
+            [sys.executable, "-c", prog],
+            cwd=str(temp_dir),
+            timeout_secs=15.0,
+            enforcement_mode="seccomp",
+        )
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.strip() == b"UDP_BLOCKED 1"
 
     def test_localhost_port_zero_fails_closed(self, base_caps, temp_dir):
         """The port-0 localhost wildcard is rejected on Linux with block-net:

@@ -109,6 +109,10 @@ print(caps.is_network_blocked)  # True
 
 <Note>
 Network is **allowed by default**. Call `block_network()` to restrict it.
+On Linux during the compatibility release, use
+`sandboxed_exec(..., enforcement_mode="seccomp")` to add the static filter that
+also denies UDP, raw/non-IP sockets, and `io_uring_setup()`. The default
+`"auto"` mode remains Landlock-first for one release.
 </Note>
 
 ---

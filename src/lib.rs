@@ -3,6 +3,67 @@
 //! Provides Python access to OS-enforced sandboxing via Landlock (Linux)
 //! and Seatbelt (macOS).
 
+#[cfg(all(target_os = "linux", debug_assertions))]
+mod raw_clone_allocator_guard {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const ALLOCATION_EXIT_STATUS: i32 = 125;
+    static ARMED: AtomicBool = AtomicBool::new(false);
+
+    pub struct GuardedSystem;
+
+    fn reject_if_armed() {
+        if ARMED.load(Ordering::Relaxed) {
+            // No formatting, unwinding, or allocator-backed diagnostics are
+            // permitted in the raw-cloned child.
+            unsafe {
+                libc::syscall(libc::SYS_exit_group, ALLOCATION_EXIT_STATUS);
+                core::hint::unreachable_unchecked();
+            }
+        }
+    }
+
+    unsafe impl GlobalAlloc for GuardedSystem {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            reject_if_armed();
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            reject_if_armed();
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            reject_if_armed();
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            reject_if_armed();
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+    }
+
+    pub fn arm() {
+        ARMED.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[global_allocator]
+static RAW_CLONE_ALLOCATOR: raw_clone_allocator_guard::GuardedSystem =
+    raw_clone_allocator_guard::GuardedSystem;
+
+#[cfg(all(target_os = "linux", debug_assertions))]
+pub(crate) fn arm_raw_clone_allocator_guard() {
+    raw_clone_allocator_guard::arm();
+}
+
+#[cfg(all(target_os = "linux", not(debug_assertions)))]
+pub(crate) fn arm_raw_clone_allocator_guard() {}
+
 use nono::{
     AccessMode as RustAccessMode, CapabilitySet as RustCapabilitySet,
     CapabilitySource as RustCapabilitySource, FsCapability as RustFsCapability, NonoError, Sandbox,
@@ -874,13 +935,13 @@ fn apply_landlock(caps: &CapabilitySet) -> PyResult<()> {
     }
 }
 
-/// Apply Landlock filesystem/process sandboxing plus seccomp TCP fallback
-/// (Linux only). **Irreversible.**
+/// Apply Landlock filesystem/process sandboxing plus the static seccomp
+/// network baseline (Linux only). **Irreversible.**
 ///
 /// Args:
 ///     caps: The capability set defining permitted operations.
 ///     external_tcp: When True, declare that TCP enforcement is handled
-///         externally instead of by nono's seccomp fallback (default False).
+///         externally instead of by nono's seccomp baseline (default False).
 ///
 /// Raises:
 ///     RuntimeError: On non-Linux platforms, or if application fails.
@@ -892,7 +953,7 @@ fn apply_seccomp(caps: &CapabilitySet, external_tcp: bool) -> PyResult<()> {
         let opts = if external_tcp {
             nono::sandbox::SeccompOpts::external_tcp()
         } else {
-            nono::sandbox::SeccompOpts::network_fallback()
+            nono::sandbox::SeccompOpts::network_baseline()
         };
         Sandbox::apply_seccomp(&caps.inner, opts).map_err(to_py_err)?;
         Ok(())
@@ -964,7 +1025,7 @@ fn apply_landlock_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> PyResult<
     }
 }
 
-/// Apply Landlock + seccomp TCP fallback with a pre-detected ABI (Linux only).
+/// Apply Landlock + the static seccomp baseline with a pre-detected ABI (Linux only).
 /// **Irreversible.** See `apply_seccomp` and `detect_abi`.
 #[pyfunction]
 #[pyo3(signature = (caps, abi, external_tcp = false))]
@@ -978,7 +1039,7 @@ fn apply_seccomp_with_abi(
         let opts = if external_tcp {
             nono::sandbox::SeccompOpts::external_tcp()
         } else {
-            nono::sandbox::SeccompOpts::network_fallback()
+            nono::sandbox::SeccompOpts::network_baseline()
         };
         Sandbox::apply_seccomp_with_abi(&caps.inner, &abi.inner, opts).map_err(to_py_err)?;
         Ok(())

@@ -128,8 +128,10 @@ class CapabilitySet:
         any address, not strictly 127.0.0.1. Enforced on Linux Landlock ABI V4+
         (kernel >= 6.7) or macOS; on Linux kernels < 6.7 it is not yet
         enforceable and the sandbox fails closed at apply time (check
-        ``detect_abi().has_network``). Only TCP — UDP egress is not filtered.
-        Not preserved across SandboxState (from_caps raises rather than drop it).
+        ``detect_abi().has_network``). Landlock itself filters only TCP. During
+        the compatibility release, default ``enforcement_mode="auto"`` does not
+        filter UDP here; explicit ``enforcement_mode="seccomp"`` does. Not
+        preserved across SandboxState (from_caps raises rather than drop it).
 
         Args:
             port: The localhost TCP port to allow.
@@ -143,10 +145,11 @@ class CapabilitySet:
         ``block_network()``: only listed ports are reachable, all other outbound
         is blocked. Landlock filters by PORT ONLY, not destination IP — the port
         is reachable on ANY host (incl. the public internet), not only approved
-        hosts; use ``proxy_only()`` for host/domain filtering. Only TCP — UDP
-        egress is not filtered. Linux Landlock ABI V4+ only; fails closed on
-        older kernels. Not available on macOS (RuntimeError at apply time, not at
-        call time). Not preserved across SandboxState (from_caps raises).
+        hosts; use ``proxy_only()`` for host/domain filtering. Landlock itself
+        filters only TCP; explicit seccomp mode additionally denies UDP. Linux
+        Landlock ABI V4+ only; fails closed on older kernels. Not available on
+        macOS (RuntimeError at apply time, not at call time). Not preserved
+        across SandboxState (from_caps raises).
 
         Args:
             port: The TCP port to allow outbound connections to.
@@ -159,10 +162,10 @@ class CapabilitySet:
         Lets an in-sandbox server (Streamlit/Gradio/Shiny) open a listen port
         while outbound stays blocked. On Linux V4+ adding a bind port blocks all
         outbound connect() on its own (the "implicit block"); pairing with
-        ``block_network()`` is still recommended. Only TCP — UDP egress is not
-        blocked. Linux Landlock ABI V4+ only; fails closed on older kernels. Not
-        available on macOS (RuntimeError at apply time). Not preserved across
-        SandboxState.
+        ``block_network()`` is still recommended. Landlock itself filters only
+        TCP; explicit seccomp mode additionally denies UDP. Linux Landlock ABI
+        V4+ only; fails closed on older kernels. Not available on macOS
+        (RuntimeError at apply time). Not preserved across SandboxState.
 
         Args:
             port: The TCP port to allow the child to bind/listen on.
@@ -528,8 +531,11 @@ def sandboxed_exec(
             Applied before uid; supplementary groups are cleared. Requires
             privilege. If uid is set and gid is omitted, gid defaults to uid so
             the child does not retain the parent's group. Must be non-zero.
-        enforcement_mode: OS mechanism to apply: "auto" (default), "landlock",
-            or "seccomp". "landlock"/"seccomp" are Linux-only.
+        enforcement_mode: Linux rollout mode. "auto" (default) preserves the
+            compatibility-oriented Landlock-first behavior for this release;
+            "seccomp" layers a static filter under Landlock to deny UDP,
+            raw/non-IP sockets, and io_uring; "landlock" requests Landlock
+            only. "landlock"/"seccomp" are Linux-only.
 
     Returns:
         ExecResult with stdout, stderr, and exit_code
@@ -579,12 +585,12 @@ def apply_landlock(caps: CapabilitySet) -> None:
     ...
 
 def apply_seccomp(caps: CapabilitySet, external_tcp: bool = False) -> None:
-    """Apply Landlock plus seccomp TCP fallback (Linux only). **Irreversible.**
+    """Apply Landlock plus the static seccomp network baseline (Linux only). **Irreversible.**
 
     Args:
         caps: The capability set defining permitted operations.
         external_tcp: When True, declare that TCP enforcement is handled
-            externally instead of by nono's seccomp fallback.
+            externally instead of by nono's seccomp baseline.
 
     Raises:
         RuntimeError: On non-Linux platforms, or if application fails.

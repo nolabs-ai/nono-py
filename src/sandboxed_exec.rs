@@ -10,6 +10,8 @@ use nono::Sandbox;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::io::{Read, Result as IoResult};
 #[cfg(target_os = "linux")]
@@ -17,6 +19,8 @@ use std::os::fd::OwnedFd;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -197,6 +201,14 @@ struct ForkContext {
     gid: Option<u32>,
     #[cfg(target_os = "linux")]
     enforcement_mode: EnforcementMode,
+    #[cfg(target_os = "linux")]
+    proxy_handoff: ProxyHandoff,
+    #[cfg(target_os = "linux")]
+    prepared_landlock: Option<nono::sandbox::PreparedLandlockSandbox>,
+    #[cfg(target_os = "linux")]
+    prepared_proxy_filter: Option<nono::sandbox::PreparedSeccompNotifyFilter>,
+    #[cfg(all(target_os = "linux", debug_assertions))]
+    clone_files_test_fault: CloneFilesTestFault,
 }
 
 /// Pipe file descriptors for stdout or stderr.
@@ -215,10 +227,75 @@ struct ProxyOnlyPolicy {
 #[cfg(target_os = "linux")]
 struct ProxySupervisor {
     sock: Option<nono::SupervisorSocket>,
-    notify_fd: Option<OwnedFd>,
+    notify_fd: Option<ProxyNotifyFd>,
     policy: ProxyOnlyPolicy,
     child_pid: i32,
 }
+
+/// A supervisor listener whose slot cannot disappear during another shared
+/// fd-table bootstrap. This keeps the before/after listener snapshot immune to
+/// descriptor-number reuse as older sandboxed targets finish concurrently.
+#[cfg(target_os = "linux")]
+struct ProxyNotifyFd {
+    fd: Option<OwnedFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl ProxyNotifyFd {
+    fn new(fd: OwnedFd) -> Self {
+        Self { fd: Some(fd) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl AsRawFd for ProxyNotifyFd {
+    fn as_raw_fd(&self) -> i32 {
+        match self.fd.as_ref() {
+            Some(fd) => fd.as_raw_fd(),
+            None => -1,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ProxyNotifyFd {
+    fn drop(&mut self) {
+        let guard = SHARED_BOOTSTRAP_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(self.fd.take());
+        drop(guard);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProxyHandoff {
+    CloneFiles,
+    Pidfd,
+}
+
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloneFilesTestFault {
+    None,
+    BeforeListener,
+    AfterListener,
+    AfterFdReport,
+    AfterUnshare,
+    AfterDetached,
+    AfterAck,
+}
+
+#[cfg(target_os = "linux")]
+static SHARED_BOOTSTRAP_MUTEX: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "linux")]
+const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
+#[cfg(target_os = "linux")]
+const HANDSHAKE_DETACHED: u8 = 0xd7;
+#[cfg(target_os = "linux")]
+const HANDSHAKE_ACK: u8 = 0xa7;
 
 /// Execute a command in a sandboxed child process.
 ///
@@ -263,8 +340,12 @@ struct ProxySupervisor {
 ///         If uid is set and gid is omitted, gid defaults to uid so the child
 ///         does not retain the parent's (possibly privileged) group. Must be
 ///         non-zero.
-///     enforcement_mode: Which OS mechanism to apply: "auto" (default, detect
-///         best), "landlock", or "seccomp". "landlock"/"seccomp" are Linux-only.
+///     enforcement_mode: Linux network enforcement rollout mode. "auto"
+///         (default) preserves the compatibility-oriented Landlock-first
+///         behavior for this release; "seccomp" layers a static seccomp
+///         baseline under Landlock to deny UDP, raw/non-IP sockets, and
+///         io_uring; "landlock" requests Landlock only. "landlock"/"seccomp"
+///         are Linux-only.
 ///
 /// Returns:
 ///     ExecResult with stdout, stderr, and exit_code
@@ -368,22 +449,8 @@ pub fn sandboxed_exec(
         ));
     }
 
-    // Verify threading before fork on Linux.
-    #[cfg(target_os = "linux")]
-    {
-        let thread_count = get_thread_count()
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to check thread count: {}", e)))?;
-        if thread_count > 32 {
-            return Err(PyRuntimeError::new_err(format!(
-                "Too many threads ({}) for safe fork. \
-                 Reduce thread count before calling sandboxed_exec.",
-                thread_count
-            )));
-        }
-    }
-
     // Prepare all data before fork (allocation-safe zone)
-    let ctx = prepare_fork_context(
+    let mut ctx = prepare_fork_context(
         &caps.inner,
         &command,
         cwd,
@@ -400,27 +467,57 @@ pub fn sandboxed_exec(
     )?;
 
     #[cfg(target_os = "linux")]
-    let proxy_supervisor_pair = create_proxy_supervisor_pair(&ctx)?;
+    prepare_linux_proxy_bootstrap(&mut ctx)?;
 
-    // Warm the Landlock ABI cache while allocation is still safe: detect_abi
-    // caches in a OnceLock, so probing here makes the child's post-fork call
-    // a plain cache read instead of kernel probes plus allocation.
+    // Keep the ordinary fork path's Landlock ABI cache warm. Proxy-only
+    // preparation already performs this probe, so this is a cheap cache read
+    // there and preserves the pre-existing child-allocation mitigation for all
+    // other Linux launches.
     #[cfg(target_os = "linux")]
-    let _ = nono::Sandbox::detect_abi();
+    let _ = Sandbox::detect_abi();
+
+    // The regular and legacy pidfd paths still use libc fork and therefore
+    // retain the conservative thread-count guard.  The CLONE_FILES path is
+    // specifically allocation-free and lock-free in the child, so it supports
+    // multithreaded embedders and the fd-churn stress case from its design.
+    #[cfg(target_os = "linux")]
+    if ctx.prepared_proxy_filter.is_none() {
+        let thread_count = get_thread_count()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to check thread count: {}", e)))?;
+        if thread_count > 32 {
+            return Err(PyRuntimeError::new_err(format!(
+                "Too many threads ({}) for safe fork. \
+                 Reduce thread count before calling sandboxed_exec.",
+                thread_count
+            )));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    let proxy_supervisor_pair = create_proxy_supervisor_pair(&ctx)?;
 
     // Create pipes for stdout and stderr
     let stdout_pipe = create_pipe()?;
-    let stderr_pipe = create_pipe()?;
+    let stderr_pipe = match create_pipe() {
+        Ok(pipe) => pipe,
+        Err(error) => {
+            unsafe {
+                libc::close(stdout_pipe.read_fd);
+                libc::close(stdout_pipe.write_fd);
+            }
+            return Err(error);
+        }
+    };
 
     // Release the GIL during fork+wait so other Python threads can proceed
     py.detach(|| {
         #[cfg(target_os = "linux")]
         {
-            do_fork_sandbox_exec(&ctx, &stdout_pipe, &stderr_pipe, proxy_supervisor_pair)
+            do_fork_sandbox_exec(&mut ctx, &stdout_pipe, &stderr_pipe, proxy_supervisor_pair)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            do_fork_sandbox_exec(&ctx, &stdout_pipe, &stderr_pipe)
+            do_fork_sandbox_exec(&mut ctx, &stdout_pipe, &stderr_pipe)
         }
     })
 }
@@ -491,14 +588,90 @@ fn prepare_fork_context(
         gid,
         #[cfg(target_os = "linux")]
         enforcement_mode,
+        #[cfg(target_os = "linux")]
+        proxy_handoff: ProxyHandoff::CloneFiles,
+        #[cfg(target_os = "linux")]
+        prepared_landlock: None,
+        #[cfg(target_os = "linux")]
+        prepared_proxy_filter: None,
+        #[cfg(all(target_os = "linux", debug_assertions))]
+        clone_files_test_fault: CloneFilesTestFault::None,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_proxy_bootstrap(ctx: &mut ForkContext) -> PyResult<()> {
+    ctx.proxy_handoff = match std::env::var("NONO_PY_PROXY_HANDOFF") {
+        Ok(value) if value == "pidfd" => ProxyHandoff::Pidfd,
+        Ok(value) if value == "clone_files" => ProxyHandoff::CloneFiles,
+        Ok(value) => {
+            return Err(PyValueError::new_err(format!(
+                "NONO_PY_PROXY_HANDOFF must be 'clone_files' or 'pidfd', got '{}'",
+                value
+            )));
+        }
+        Err(std::env::VarError::NotPresent) => ProxyHandoff::CloneFiles,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(PyValueError::new_err(
+                "NONO_PY_PROXY_HANDOFF is not valid UTF-8",
+            ));
+        }
+    };
+
+    let Some(policy) = proxy_only_policy(&ctx.caps) else {
+        return Ok(());
+    };
+
+    let abi = Sandbox::detect_abi()
+        .map_err(|e| PyRuntimeError::new_err(format!("Landlock ABI detection failed: {}", e)))?;
+    if abi.has_network() || ctx.proxy_handoff == ProxyHandoff::Pidfd {
+        return Ok(());
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        ctx.clone_files_test_fault = match std::env::var("NONO_PY_TEST_CLONE_FILES_FAULT") {
+            Err(std::env::VarError::NotPresent) => CloneFilesTestFault::None,
+            Ok(value) if value == "before_listener" => CloneFilesTestFault::BeforeListener,
+            Ok(value) if value == "after_listener" => CloneFilesTestFault::AfterListener,
+            Ok(value) if value == "after_fd_report" => CloneFilesTestFault::AfterFdReport,
+            Ok(value) if value == "after_unshare" => CloneFilesTestFault::AfterUnshare,
+            Ok(value) if value == "after_detached" => CloneFilesTestFault::AfterDetached,
+            Ok(value) if value == "after_ack" => CloneFilesTestFault::AfterAck,
+            Ok(value) => {
+                return Err(PyValueError::new_err(format!(
+                    "NONO_PY_TEST_CLONE_FILES_FAULT has unknown phase '{}'",
+                    value
+                )));
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(PyValueError::new_err(
+                    "NONO_PY_TEST_CLONE_FILES_FAULT is not valid UTF-8",
+                ));
+            }
+        };
+    }
+
+    let prepared_landlock = Sandbox::prepare_seccomp_with_abi(
+        &ctx.caps,
+        &abi,
+        nono::sandbox::SeccompOpts::preinstalled_tcp_filter(),
+    )
+    .map_err(|e| PyRuntimeError::new_err(format!("Failed to prepare child sandbox: {}", e)))?;
+    ctx.prepared_proxy_filter = Some(nono::sandbox::prepare_seccomp_proxy_filter(
+        !policy.bind_ports.is_empty(),
+    ));
+    ctx.prepared_landlock = Some(prepared_landlock);
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn create_proxy_supervisor_pair(
     ctx: &ForkContext,
 ) -> PyResult<Option<(nono::SupervisorSocket, nono::SupervisorSocket)>> {
-    if proxy_only_policy(&ctx.caps).is_none() {
+    if proxy_only_policy(&ctx.caps).is_none()
+        || (ctx.prepared_proxy_filter.is_none() && ctx.proxy_handoff != ProxyHandoff::Pidfd)
+    {
         return Ok(None);
     }
 
@@ -686,7 +859,7 @@ fn set_cloexec(fd: i32) -> IoResult<()> {
 
 /// Fork, apply sandbox in child, exec command, capture output in parent.
 fn do_fork_sandbox_exec(
-    ctx: &ForkContext,
+    ctx: &mut ForkContext,
     stdout_pipe: &PipeFds,
     stderr_pipe: &PipeFds,
     #[cfg(target_os = "linux")] proxy_supervisor_pair: Option<(
@@ -707,6 +880,18 @@ fn do_fork_sandbox_exec(
         .map(|s| s.as_ptr())
         .chain(std::iter::once(std::ptr::null()))
         .collect();
+
+    #[cfg(target_os = "linux")]
+    if ctx.prepared_proxy_filter.is_some() {
+        return do_clone_files_sandbox_exec(
+            ctx,
+            &argv_ptrs,
+            &envp_ptrs,
+            stdout_pipe,
+            stderr_pipe,
+            proxy_supervisor_pair,
+        );
+    }
 
     // SAFETY: fork() creates a child process. Only the forking thread
     // continues in the child, so any lock held by another parent thread at
@@ -748,16 +933,745 @@ fn do_fork_sandbox_exec(
     set_child_process_group(pid);
 
     // === PARENT PROCESS ===
+    #[cfg(target_os = "linux")]
+    let proxy_supervisor =
+        create_proxy_supervisor(proxy_supervisor_pair, proxy_only_policy(&ctx.caps), pid);
+
     parent_process(
         pid,
         stdout_pipe,
         stderr_pipe,
         ctx,
         #[cfg(target_os = "linux")]
-        proxy_supervisor_pair,
-        #[cfg(target_os = "linux")]
-        proxy_only_policy(&ctx.caps),
+        proxy_supervisor,
     )
+}
+
+#[cfg(target_os = "linux")]
+struct SignalMaskGuard {
+    old_mask: libc::sigset_t,
+    restored: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl SignalMaskGuard {
+    fn block_all() -> IoResult<Self> {
+        // SAFETY: both sigset pointers are valid and only the calling thread's
+        // mask is changed.  SIGKILL/SIGSTOP are silently left unblocked.
+        unsafe {
+            let mut all = std::mem::zeroed::<libc::sigset_t>();
+            let mut old_mask = std::mem::zeroed::<libc::sigset_t>();
+            libc::sigfillset(&mut all);
+            let err = libc::pthread_sigmask(libc::SIG_SETMASK, &all, &mut old_mask);
+            if err != 0 {
+                return Err(std::io::Error::from_raw_os_error(err));
+            }
+            Ok(Self {
+                old_mask,
+                restored: false,
+            })
+        }
+    }
+
+    fn restore(&mut self) -> IoResult<()> {
+        if self.restored {
+            return Ok(());
+        }
+        // SAFETY: old_mask was initialized by pthread_sigmask above.
+        let err = unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.old_mask, std::ptr::null_mut())
+        };
+        if err != 0 {
+            return Err(std::io::Error::from_raw_os_error(err));
+        }
+        self.restored = true;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SignalMaskGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn do_clone_files_sandbox_exec(
+    ctx: &mut ForkContext,
+    argv_ptrs: &[*const libc::c_char],
+    envp_ptrs: &[*const libc::c_char],
+    stdout_pipe: &PipeFds,
+    stderr_pipe: &PipeFds,
+    proxy_supervisor_pair: Option<(nono::SupervisorSocket, nono::SupervisorSocket)>,
+) -> PyResult<ExecResult> {
+    let bootstrap_guard = SHARED_BOOTSTRAP_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let listener_snapshot = match seccomp_notify_fds() {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            close_all_pipe_fds(stdout_pipe, stderr_pipe);
+            return Err(PyRuntimeError::new_err(format!(
+                "Failed to snapshot seccomp listener fds: {}",
+                e
+            )));
+        }
+    };
+    let mut signal_guard = match SignalMaskGuard::block_all() {
+        Ok(guard) => guard,
+        Err(e) => {
+            close_all_pipe_fds(stdout_pipe, stderr_pipe);
+            return Err(PyRuntimeError::new_err(format!(
+                "Failed to block signals before clone: {}",
+                e
+            )));
+        }
+    };
+    let original_parent_pid = unsafe { libc::getpid() };
+
+    // SAFETY: CLONE_FILES shares only the descriptor table.  No VM, signal
+    // handlers, TLS, parent/child tid pointers, or namespaces are shared.
+    let clone_result = unsafe {
+        libc::syscall(
+            libc::SYS_clone,
+            libc::CLONE_FILES | libc::SIGCHLD,
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+
+    if clone_result == 0 {
+        crate::arm_raw_clone_allocator_guard();
+        child_process_clone_files(CloneFilesChildArgs {
+            ctx,
+            argv_ptrs,
+            envp_ptrs,
+            stdout_pipe,
+            stderr_pipe,
+            proxy_supervisor_pair: proxy_supervisor_pair.as_ref(),
+            original_parent_pid,
+            intended_signal_mask: &signal_guard.old_mask,
+        });
+    }
+
+    if clone_result < 0 {
+        close_all_pipe_fds(stdout_pipe, stderr_pipe);
+        return Err(PyRuntimeError::new_err(format!(
+            "clone(CLONE_FILES) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let child_pid = clone_result as i32;
+
+    if let Err(e) = signal_guard.restore() {
+        cleanup_failed_shared_bootstrap(
+            child_pid,
+            None,
+            &listener_snapshot,
+            stdout_pipe,
+            stderr_pipe,
+        );
+        return Err(PyRuntimeError::new_err(format!(
+            "Failed to restore parent signal mask: {}",
+            e
+        )));
+    }
+    set_child_process_group(child_pid);
+
+    let Some((supervisor_sock, child_sock)) = proxy_supervisor_pair else {
+        kill_and_reap_bootstrap_child(child_pid);
+        close_all_pipe_fds(stdout_pipe, stderr_pipe);
+        return Err(PyRuntimeError::new_err(
+            "clone-files proxy bootstrap is missing its supervisor socket",
+        ));
+    };
+
+    let mut raw_listener = None;
+    let handshake = (|| -> PyResult<i32> {
+        let mut fd_bytes = [0_u8; std::mem::size_of::<i32>()];
+        read_bootstrap_exact(supervisor_sock.as_raw_fd(), child_pid, &mut fd_bytes)?;
+        let listener = i32::from_ne_bytes(fd_bytes);
+        if listener < 0 {
+            return Err(PyRuntimeError::new_err(
+                "child reported an invalid seccomp listener slot",
+            ));
+        }
+        raw_listener = Some(listener);
+
+        let mut detached = [0_u8; 1];
+        read_bootstrap_exact(supervisor_sock.as_raw_fd(), child_pid, &mut detached)?;
+        if detached[0] != HANDSHAKE_DETACHED {
+            return Err(PyRuntimeError::new_err(
+                "invalid DETACHED marker in proxy bootstrap",
+            ));
+        }
+        Ok(listener)
+    })();
+
+    let listener = match handshake {
+        Ok(listener) => listener,
+        Err(error) => {
+            cleanup_failed_shared_bootstrap(
+                child_pid,
+                raw_listener,
+                &listener_snapshot,
+                stdout_pipe,
+                stderr_pipe,
+            );
+            drop(child_sock);
+            drop(supervisor_sock);
+            return Err(error);
+        }
+    };
+
+    // The child's table is private now.  Parent RAII may safely close its copy
+    // of the child endpoint and all parent copies of prepared path fds.
+    drop(child_sock);
+    drop(ctx.prepared_landlock.take());
+    drop(ctx.prepared_proxy_filter.take());
+
+    if let Err(error) = validate_seccomp_notify_fd(listener) {
+        cleanup_failed_shared_bootstrap(
+            child_pid,
+            Some(listener),
+            &listener_snapshot,
+            stdout_pipe,
+            stderr_pipe,
+        );
+        drop(supervisor_sock);
+        return Err(error);
+    }
+
+    // SAFETY: DETACHED proves the parent now privately owns this table slot.
+    let listener = unsafe { OwnedFd::from_raw_fd(listener) };
+    if let Err(e) = write_all_raw(supervisor_sock.as_raw_fd(), &[HANDSHAKE_ACK]) {
+        kill_and_reap_bootstrap_child(child_pid);
+        close_all_pipe_fds(stdout_pipe, stderr_pipe);
+        return Err(PyRuntimeError::new_err(format!(
+            "proxy supervisor ACK failed: {}",
+            e
+        )));
+    }
+    drop(supervisor_sock);
+    let listener = ProxyNotifyFd::new(listener);
+    drop(bootstrap_guard);
+
+    let proxy_supervisor = Some(ProxySupervisor {
+        sock: None,
+        notify_fd: Some(listener),
+        policy: proxy_only_policy(&ctx.caps)
+            .expect("prepared proxy bootstrap always has proxy policy"),
+        child_pid,
+    });
+
+    parent_process(child_pid, stdout_pipe, stderr_pipe, ctx, proxy_supervisor)
+}
+
+#[cfg(target_os = "linux")]
+struct CloneFilesChildArgs<'a> {
+    ctx: &'a ForkContext,
+    argv_ptrs: &'a [*const libc::c_char],
+    envp_ptrs: &'a [*const libc::c_char],
+    stdout_pipe: &'a PipeFds,
+    stderr_pipe: &'a PipeFds,
+    proxy_supervisor_pair: Option<&'a (nono::SupervisorSocket, nono::SupervisorSocket)>,
+    original_parent_pid: libc::pid_t,
+    intended_signal_mask: &'a libc::sigset_t,
+}
+
+#[cfg(target_os = "linux")]
+fn child_process_clone_files(args: CloneFilesChildArgs<'_>) -> ! {
+    let CloneFilesChildArgs {
+        ctx,
+        argv_ptrs,
+        envp_ptrs,
+        stdout_pipe,
+        stderr_pipe,
+        proxy_supervisor_pair,
+        original_parent_pid,
+        intended_signal_mask,
+    } = args;
+    let Some((supervisor_sock, child_sock)) = proxy_supervisor_pair else {
+        child_die_raw(b"nono: missing clone-files supervisor socket\n", 126);
+    };
+    let Some(filter) = ctx.prepared_proxy_filter.as_ref() else {
+        child_die_raw(b"nono: missing prepared proxy filter\n", 126);
+    };
+    let Some(landlock) = ctx.prepared_landlock.as_ref() else {
+        child_die_raw(b"nono: missing prepared Landlock policy\n", 126);
+    };
+
+    unsafe {
+        if libc::syscall(
+            libc::SYS_prctl,
+            libc::PR_SET_PDEATHSIG,
+            libc::SIGKILL,
+            0,
+            0,
+            0,
+        ) < 0
+            || libc::syscall(libc::SYS_getppid) as libc::pid_t != original_parent_pid
+        {
+            child_die_raw(b"nono: parent died during proxy bootstrap\n", 126);
+        }
+        libc::syscall(libc::SYS_setpgid, 0, 0);
+    }
+
+    #[cfg(debug_assertions)]
+    if ctx.clone_files_test_fault == CloneFilesTestFault::BeforeListener {
+        child_die_raw(b"nono: injected failure before listener creation\n", 126);
+    }
+
+    let listener = match filter.install_raw() {
+        Ok(fd) => fd,
+        Err(_) => child_die_raw(b"nono: failed to install prepared proxy filter\n", 126),
+    };
+    #[cfg(debug_assertions)]
+    if ctx.clone_files_test_fault == CloneFilesTestFault::AfterListener {
+        child_die_raw(b"nono: injected failure after listener creation\n", 126);
+    }
+    if !raw_write_all(child_sock.as_raw_fd(), &listener.to_ne_bytes()) {
+        child_die_raw(b"nono: failed to report proxy listener slot\n", 126);
+    }
+    #[cfg(debug_assertions)]
+    if ctx.clone_files_test_fault == CloneFilesTestFault::AfterFdReport {
+        child_die_raw(b"nono: injected failure after listener report\n", 126);
+    }
+
+    // Empty range: unshare the table but close nothing.
+    let detached = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            u32::MAX,
+            u32::MAX,
+            CLOSE_RANGE_UNSHARE,
+        )
+    };
+    if detached < 0 {
+        child_die_raw(b"nono: close_range fd-table detach failed\n", 126);
+    }
+    #[cfg(debug_assertions)]
+    if ctx.clone_files_test_fault == CloneFilesTestFault::AfterUnshare {
+        child_die_raw(b"nono: injected failure after fd-table detach\n", 126);
+    }
+
+    raw_close(supervisor_sock.as_raw_fd());
+    if !raw_write_all(child_sock.as_raw_fd(), &[HANDSHAKE_DETACHED]) {
+        child_die_raw(b"nono: failed to send DETACHED marker\n", 126);
+    }
+    #[cfg(debug_assertions)]
+    if ctx.clone_files_test_fault == CloneFilesTestFault::AfterDetached {
+        child_die_raw(b"nono: injected failure after DETACHED\n", 126);
+    }
+    let mut ack = [0_u8; 1];
+    if !raw_read_exact(child_sock.as_raw_fd(), &mut ack) || ack[0] != HANDSHAKE_ACK {
+        child_die_raw(b"nono: parent did not ACK proxy handoff\n", 126);
+    }
+    #[cfg(debug_assertions)]
+    if ctx.clone_files_test_fault == CloneFilesTestFault::AfterAck {
+        child_die_raw(b"nono: injected failure after ACK\n", 126);
+    }
+
+    // The handshake endpoint is no longer needed. Close it before dup3 so a
+    // socket originally allocated into a closed stdout/stderr slot cannot be
+    // mistaken for the newly wired pipe later in bootstrap.
+    raw_close(child_sock.as_raw_fd());
+
+    raw_close(stdout_pipe.read_fd);
+    raw_close(stderr_pipe.read_fd);
+    if !raw_dup2(stdout_pipe.write_fd, libc::STDOUT_FILENO)
+        || !raw_dup2(stderr_pipe.write_fd, libc::STDERR_FILENO)
+    {
+        child_die_raw(b"nono: failed to wire child stdio\n", 126);
+    }
+    if stdout_pipe.write_fd != libc::STDOUT_FILENO {
+        raw_close(stdout_pipe.write_fd);
+    }
+    if stderr_pipe.write_fd != libc::STDERR_FILENO {
+        raw_close(stderr_pipe.write_fd);
+    }
+
+    if let Some(dir) = ctx.cwd_c.as_ref()
+        && unsafe { libc::syscall(libc::SYS_chdir, dir.as_ptr()) } < 0
+    {
+        child_die_raw(b"nono: failed to chdir\n", 126);
+    }
+    if !drop_privileges_raw(ctx.uid, ctx.gid) {
+        child_die_raw(b"nono: failed to drop privileges\n", 126);
+    }
+    if landlock.apply_raw().is_err() {
+        child_die_raw(b"nono: prepared sandbox apply failed\n", 126);
+    }
+    if !apply_resource_limits_raw(ctx) {
+        child_die_raw(b"nono: failed to set resource limit\n", 126);
+    }
+
+    if unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) } < 0 {
+        child_die_raw(b"nono: final fd scrub failed\n", 126);
+    }
+    if !restore_signal_mask_raw(intended_signal_mask) {
+        child_die_raw(b"nono: failed to restore child signal mask\n", 126);
+    }
+
+    unsafe {
+        libc::syscall(
+            libc::SYS_execve,
+            ctx.program_c.as_ptr(),
+            argv_ptrs.as_ptr(),
+            envp_ptrs.as_ptr(),
+        );
+    }
+    child_die_raw(b"nono: exec failed\n", 127)
+}
+
+#[cfg(target_os = "linux")]
+fn close_all_pipe_fds(stdout_pipe: &PipeFds, stderr_pipe: &PipeFds) {
+    unsafe {
+        libc::close(stdout_pipe.read_fd);
+        libc::close(stdout_pipe.write_fd);
+        libc::close(stderr_pipe.read_fd);
+        libc::close(stderr_pipe.write_fd);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_bootstrap_exact(fd: i32, child_pid: i32, buf: &mut [u8]) -> PyResult<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            revents: 0,
+        };
+        // SAFETY: pfd points to one initialized pollfd.
+        let poll_result = unsafe { libc::poll(&mut pfd, 1, 10) };
+        if poll_result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(PyRuntimeError::new_err(format!(
+                "proxy bootstrap poll failed: {}",
+                error
+            )));
+        }
+
+        if poll_result > 0 && pfd.revents & libc::POLLIN != 0 {
+            // SAFETY: the destination slice is valid and the socket remains
+            // protected by the bootstrap owner.
+            let read = unsafe {
+                libc::read(
+                    fd,
+                    buf[filled..].as_mut_ptr().cast::<libc::c_void>(),
+                    buf.len() - filled,
+                )
+            };
+            if read > 0 {
+                filled += read as usize;
+                continue;
+            }
+            if read < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(PyRuntimeError::new_err(format!(
+                    "proxy bootstrap read failed: {}",
+                    error
+                )));
+            }
+        }
+
+        let mut status = 0_i32;
+        // Socket EOF is not meaningful before DETACHED because the parent
+        // still holds both endpoints.  waitpid is the liveness oracle.
+        let waited = unsafe { libc::waitpid(child_pid, &mut status, libc::WNOHANG) };
+        if waited == child_pid {
+            return Err(PyRuntimeError::new_err(
+                "sandbox child exited before proxy fd-table detach",
+            ));
+        }
+        if waited < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(PyRuntimeError::new_err(format!(
+                    "waitpid during proxy bootstrap failed: {}",
+                    error
+                )));
+            }
+        }
+        if poll_result > 0 && pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(PyRuntimeError::new_err(
+                "proxy bootstrap socket failed before handoff completed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn is_seccomp_notify_target(target: &std::ffi::OsStr) -> bool {
+    target == std::ffi::OsStr::new("anon_inode:seccomp notify")
+        || target == std::ffi::OsStr::new("anon_inode:[seccomp notify]")
+}
+
+#[cfg(target_os = "linux")]
+fn seccomp_notify_fds() -> IoResult<BTreeSet<i32>> {
+    let mut listeners = BTreeSet::new();
+    for entry in std::fs::read_dir("/proc/self/fd")? {
+        let entry = entry?;
+        let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if let Ok(target) = std::fs::read_link(entry.path())
+            && is_seccomp_notify_target(target.as_os_str())
+        {
+            listeners.insert(fd);
+        }
+    }
+    Ok(listeners)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_seccomp_notify_fd(fd: i32) -> PyResult<()> {
+    let target = std::fs::read_link(format!("/proc/self/fd/{}", fd)).map_err(|e| {
+        PyRuntimeError::new_err(format!(
+            "cannot inspect proxy listener slot {} after DETACHED: {}",
+            fd, e
+        ))
+    })?;
+    if !is_seccomp_notify_target(target.as_os_str()) {
+        return Err(PyRuntimeError::new_err(format!(
+            "fd {} is not a seccomp notification listener after DETACHED (target: {})",
+            fd,
+            target.display()
+        )));
+    }
+    // NEW_LISTENER is specified to return O_CLOEXEC.  Treat a missing flag as
+    // a bootstrap integrity failure rather than allowing target inheritance.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
+        return Err(PyRuntimeError::new_err(format!(
+            "seccomp listener slot {} is missing FD_CLOEXEC",
+            fd
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_failed_shared_bootstrap(
+    child_pid: i32,
+    known_listener: Option<i32>,
+    listener_snapshot: &BTreeSet<i32>,
+    stdout_pipe: &PipeFds,
+    stderr_pipe: &PipeFds,
+) {
+    // Establish that the child can no longer mutate or detach the table before
+    // closing any raw listener slot inherited through CLONE_FILES.
+    kill_and_reap_bootstrap_child(child_pid);
+
+    let mut to_close = seccomp_notify_fds()
+        .unwrap_or_default()
+        .difference(listener_snapshot)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if let Some(fd) = known_listener {
+        to_close.insert(fd);
+    }
+    for fd in to_close {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+    close_all_pipe_fds(stdout_pipe, stderr_pipe);
+}
+
+#[cfg(target_os = "linux")]
+fn kill_and_reap_bootstrap_child(child_pid: i32) {
+    unsafe {
+        libc::kill(child_pid, libc::SIGKILL);
+    }
+    loop {
+        let waited = unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
+        if waited == child_pid {
+            return;
+        }
+        if waited < 0 {
+            let errno = unsafe { *libc::__errno_location() };
+            if errno == libc::ECHILD {
+                // A prior WNOHANG probe already reaped the child.
+                return;
+            }
+            // EINTR is expected under signal stress. Other errors are not
+            // expected for a direct child and valid wait arguments; retry so
+            // protected shared-table descriptors are never closed before the
+            // child is known unable to mutate them.
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn raw_errno() -> i32 {
+    unsafe { *libc::__errno_location() }
+}
+
+#[cfg(target_os = "linux")]
+fn raw_write_all(fd: i32, buf: &[u8]) -> bool {
+    let mut written = 0;
+    while written < buf.len() {
+        let count = unsafe {
+            libc::syscall(
+                libc::SYS_write,
+                fd,
+                buf[written..].as_ptr(),
+                buf.len() - written,
+            )
+        };
+        if count > 0 {
+            written += count as usize;
+        } else if count < 0 && raw_errno() == libc::EINTR {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn raw_read_exact(fd: i32, buf: &mut [u8]) -> bool {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let count = unsafe {
+            libc::syscall(
+                libc::SYS_read,
+                fd,
+                buf[filled..].as_mut_ptr(),
+                buf.len() - filled,
+            )
+        };
+        if count > 0 {
+            filled += count as usize;
+        } else if count < 0 && raw_errno() == libc::EINTR {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn raw_close(fd: i32) {
+    unsafe {
+        libc::syscall(libc::SYS_close, fd);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn raw_dup2(from: i32, to: i32) -> bool {
+    if from != to {
+        return unsafe { libc::syscall(libc::SYS_dup3, from, to, 0_u32) } >= 0;
+    }
+
+    // dup2(fd, fd) is a no-op, so explicitly clear the pipe2 O_CLOEXEC flag
+    // when an originally closed stdio slot was reused as the pipe source.
+    let flags = unsafe { libc::syscall(libc::SYS_fcntl, from, libc::F_GETFD) };
+    flags >= 0
+        && unsafe {
+            libc::syscall(
+                libc::SYS_fcntl,
+                from,
+                libc::F_SETFD,
+                flags & !(libc::FD_CLOEXEC as libc::c_long),
+            )
+        } >= 0
+}
+
+#[cfg(target_os = "linux")]
+fn raw_set_rlimit(resource: RlimitResource, value: u64) -> bool {
+    let rlim = clamp_rlim(value);
+    let limit = libc::rlimit {
+        rlim_cur: rlim,
+        rlim_max: rlim,
+    };
+    unsafe {
+        libc::syscall(
+            libc::SYS_prlimit64,
+            0,
+            resource,
+            &limit as *const libc::rlimit,
+            std::ptr::null::<libc::rlimit>(),
+        ) >= 0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_resource_limits_raw(ctx: &ForkContext) -> bool {
+    ctx.max_cpu_seconds
+        .is_none_or(|value| raw_set_rlimit(libc::RLIMIT_CPU, value))
+        && ctx
+            .max_file_size_bytes
+            .is_none_or(|value| raw_set_rlimit(libc::RLIMIT_FSIZE, value))
+        && ctx
+            .max_processes
+            .is_none_or(|value| raw_set_rlimit(libc::RLIMIT_NPROC, value))
+        && ctx
+            .max_open_files
+            .is_none_or(|value| raw_set_rlimit(libc::RLIMIT_NOFILE, value))
+}
+
+#[cfg(target_os = "linux")]
+fn drop_privileges_raw(uid: Option<u32>, gid: Option<u32>) -> bool {
+    if uid.is_none() && gid.is_none() {
+        return true;
+    }
+    if unsafe { libc::syscall(libc::SYS_setgroups, 0, std::ptr::null::<libc::gid_t>()) } < 0 {
+        return false;
+    }
+    if let Some(gid) = gid
+        && (unsafe { libc::syscall(libc::SYS_setresgid, gid, gid, gid) } < 0
+            || unsafe { libc::syscall(libc::SYS_getgid) } as u32 != gid
+            || unsafe { libc::syscall(libc::SYS_getegid) } as u32 != gid)
+    {
+        return false;
+    }
+    if let Some(uid) = uid
+        && (unsafe { libc::syscall(libc::SYS_setresuid, uid, uid, uid) } < 0
+            || unsafe { libc::syscall(libc::SYS_getuid) } as u32 != uid
+            || unsafe { libc::syscall(libc::SYS_geteuid) } as u32 != uid)
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn restore_signal_mask_raw(mask: &libc::sigset_t) -> bool {
+    // The kernel rt_sigprocmask ABI uses _NSIG / 8 bytes (8 on supported
+    // x86_64 and arm64 Linux), rather than libc's padded sigset_t size.
+    unsafe {
+        libc::syscall(
+            libc::SYS_rt_sigprocmask,
+            libc::SIG_SETMASK,
+            mask as *const libc::sigset_t,
+            std::ptr::null_mut::<libc::sigset_t>(),
+            8_usize,
+        ) >= 0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn child_die_raw(message: &'static [u8], code: i32) -> ! {
+    let _ = raw_write_all(libc::STDERR_FILENO, message);
+    unsafe {
+        libc::syscall(libc::SYS_exit_group, code);
+        core::hint::unreachable_unchecked();
+    }
 }
 
 /// Child process: set up pipes, apply sandbox, chdir, exec.
@@ -839,7 +1753,7 @@ fn child_process(
         let applied = match ctx.enforcement_mode {
             EnforcementMode::Auto => Sandbox::apply_auto(&ctx.caps).map(Some),
             EnforcementMode::Seccomp => {
-                Sandbox::apply_seccomp(&ctx.caps, nono::sandbox::SeccompOpts::network_fallback())
+                Sandbox::apply_seccomp(&ctx.caps, nono::sandbox::SeccompOpts::network_baseline())
                     .map(Some)
             }
             EnforcementMode::Landlock => Sandbox::apply_landlock(&ctx.caps).map(|()| None),
@@ -1245,11 +2159,7 @@ fn parent_process(
     stdout_pipe: &PipeFds,
     stderr_pipe: &PipeFds,
     ctx: &ForkContext,
-    #[cfg(target_os = "linux")] proxy_supervisor_pair: Option<(
-        nono::SupervisorSocket,
-        nono::SupervisorSocket,
-    )>,
-    #[cfg(target_os = "linux")] proxy_policy: Option<ProxyOnlyPolicy>,
+    #[cfg(target_os = "linux")] mut proxy_supervisor: Option<ProxySupervisor>,
 ) -> PyResult<ExecResult> {
     // Close write ends (child writes, parent reads)
     unsafe {
@@ -1257,17 +2167,19 @@ fn parent_process(
         libc::close(stderr_pipe.write_fd);
     }
 
-    #[cfg(target_os = "linux")]
-    let mut proxy_supervisor =
-        create_proxy_supervisor(proxy_supervisor_pair, proxy_policy, child_pid);
-
     // Capture read fds before spawning threads (moved into closures)
     let stdout_read = stdout_pipe.read_fd;
     let stderr_read = stderr_pipe.read_fd;
-    set_nonblocking(stdout_read)
-        .map_err(|e| PyRuntimeError::new_err(format!("fcntl(O_NONBLOCK) failed: {}", e)))?;
-    set_nonblocking(stderr_read)
-        .map_err(|e| PyRuntimeError::new_err(format!("fcntl(O_NONBLOCK) failed: {}", e)))?;
+    if let Err(e) = set_nonblocking(stdout_read).and_then(|_| set_nonblocking(stderr_read)) {
+        unsafe {
+            libc::close(stdout_read);
+            libc::close(stderr_read);
+        }
+        return Err(PyRuntimeError::new_err(format!(
+            "fcntl(O_NONBLOCK) failed: {}",
+            e
+        )));
+    }
     let cancel_readers = Arc::new(AtomicBool::new(false));
 
     // Spawn reader threads to drain pipes concurrently.
@@ -1502,8 +2414,8 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
     if pfd.revents & libc::POLLIN != 0 {
         // The child writes the notify fd *number* with plain write(2)
         // (SCM_RIGHTS would be trapped by the proxy filter it just
-        // installed). Clone the actual fd out of the child, then ack so the
-        // child knows it can drop its copy and exec.
+        // installed). This function is reached only by the explicitly selected
+        // NONO_PY_PROXY_HANDOFF=pidfd rollback path.
         let remote_fd = match sock.recv_raw_fd_number() {
             Ok(fd) => fd,
             Err(_) => {
@@ -1512,9 +2424,16 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
             }
         };
 
+        // Serialize legacy listener insertion into the parent table with the
+        // clone-files before/after snapshot. Once wrapped, its eventual close
+        // is protected by the same mutex.
+        let bootstrap_guard = SHARED_BOOTSTRAP_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match clone_fd_from_child(supervisor.child_pid, remote_fd) {
             Ok(local_fd) => {
-                supervisor.notify_fd = Some(local_fd);
+                supervisor.notify_fd = Some(ProxyNotifyFd::new(local_fd));
+                drop(bootstrap_guard);
                 let ack = [1u8];
                 // SAFETY: sock is a valid open socketpair fd; 1-byte write.
                 let ret = unsafe { libc::write(sock.as_raw_fd(), ack.as_ptr().cast(), 1) };
@@ -1527,19 +2446,18 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
                 }
             }
             Err(e) => {
+                drop(bootstrap_guard);
                 // Drop the socket so the child's ack read sees EOF and it
                 // fails closed instead of waiting forever.
                 supervisor.sock = None;
-                // EPERM here almost always means a container seccomp profile
-                // that gates pidfd_getfd behind CAP_SYS_PTRACE (the Docker /
-                // containerd / ECS default). Point the operator at the real
-                // remedies instead of a bare errno.
+                // Keep this hint scoped to the explicitly selected rollback
+                // path.  The default clone-files handoff needs no capability.
                 let hint = if e.raw_os_error() == Some(libc::EPERM) {
                     " — pidfd_getfd is blocked by the container seccomp profile. \
-                     proxy_only() on this (pre-Landlock-V4) kernel needs one of: \
-                     add CAP_SYS_PTRACE, run on kernel >= 6.7 (Landlock network \
-                     enforcement, no seccomp fallback), or use block_network() \
-                     instead of proxy_only()"
+                     NONO_PY_PROXY_HANDOFF=pidfd selected the legacy rollback \
+                     implementation; unset it to use the capability-free \
+                     clone-files handoff. Older releases on ECS-EC2/EKS can \
+                     instead use a custom profile allowing only pidfd_getfd"
                 } else {
                     " — requires kernel >= 5.6 and ptrace access to the child"
                 };
@@ -1559,7 +2477,7 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
     Ok(())
 }
 
-/// Clone a file descriptor out of the child process via pidfd_getfd(2).
+/// Legacy rollback: clone a file descriptor out of the child via pidfd_getfd(2).
 ///
 /// Requires kernel >= 5.6 and PTRACE_MODE_ATTACH_REALCREDS permission over
 /// the child (a direct parent has this under default Yama settings).
@@ -1567,9 +2485,8 @@ fn try_receive_proxy_notify_fd(supervisor: &mut ProxySupervisor) -> PyResult<()>
 /// Caveat: a container seccomp profile can still block the pidfd_getfd
 /// syscall itself even when ptrace permission is granted. The Docker /
 /// containerd / ECS default profile allows pidfd_getfd only with
-/// CAP_SYS_PTRACE, so proxy_only() over the seccomp fallback (pre-Landlock-V4
-/// kernels) returns EPERM there. This mirrors nono's own CLI supervisor,
-/// which uses the same pidfd_getfd handoff.
+/// CAP_SYS_PTRACE, so the explicitly selected rollback path returns EPERM
+/// there. The default CLONE_FILES handoff does not call either pidfd syscall.
 #[cfg(target_os = "linux")]
 fn clone_fd_from_child(child_pid: i32, remote_fd: i32) -> IoResult<OwnedFd> {
     // SAFETY: pidfd_open has no libc wrapper; arguments are a valid pid and
@@ -1841,5 +2758,170 @@ mod tests {
     fn zero_uid_rejected_before_defaulting() {
         // Must reject rather than quietly turn into gid = 0.
         assert!(resolve_ids(Some(0), None).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_range_empty_unshare_detaches_fd_table() {
+        let mut sockets = [-1_i32; 2];
+        assert_eq!(
+            unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                    0,
+                    sockets.as_mut_ptr(),
+                )
+            },
+            0
+        );
+        let mut flag_probe = [-1_i32; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(flag_probe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+
+        let pid = unsafe {
+            libc::syscall(
+                libc::SYS_clone,
+                libc::CLONE_FILES | libc::SIGCHLD,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let detached = unsafe {
+                libc::syscall(
+                    libc::SYS_close_range,
+                    u32::MAX,
+                    u32::MAX,
+                    super::CLOSE_RANGE_UNSHARE,
+                )
+            };
+            if detached < 0 {
+                unsafe { libc::_exit(10) };
+            }
+            super::raw_close(sockets[0]);
+            let child_cleared_cloexec =
+                unsafe { libc::syscall(libc::SYS_fcntl, flag_probe[0], libc::F_SETFD, 0) };
+            let child_fd = unsafe {
+                libc::syscall(
+                    libc::SYS_memfd_create,
+                    c"nono-child-private".as_ptr(),
+                    libc::MFD_CLOEXEC,
+                ) as i32
+            };
+            let mut child_stat: libc::stat = unsafe { std::mem::zeroed() };
+            let child_stat_ok = child_fd >= 0
+                && unsafe { libc::syscall(libc::SYS_fstat, child_fd, &raw mut child_stat) == 0 };
+            let mut child_identity = [0_u8; 20];
+            child_identity[..4].copy_from_slice(&child_fd.to_ne_bytes());
+            child_identity[4..12].copy_from_slice(&(child_stat.st_dev as u64).to_ne_bytes());
+            child_identity[12..].copy_from_slice(&(child_stat.st_ino as u64).to_ne_bytes());
+            if child_cleared_cloexec < 0
+                || child_fd < 0
+                || !child_stat_ok
+                || !super::raw_write_all(sockets[1], &[super::HANDSHAKE_DETACHED])
+                || !super::raw_write_all(sockets[1], &child_identity)
+            {
+                unsafe { libc::_exit(11) };
+            }
+            let mut parent_identity = [0_u8; 20];
+            if !super::raw_read_exact(sockets[1], &mut parent_identity) {
+                unsafe { libc::_exit(12) };
+            }
+            let parent_fd = i32::from_ne_bytes(parent_identity[..4].try_into().unwrap());
+            let parent_dev = u64::from_ne_bytes(parent_identity[4..12].try_into().unwrap());
+            let parent_ino = u64::from_ne_bytes(parent_identity[12..].try_into().unwrap());
+            let mut observed_parent_stat: libc::stat = unsafe { std::mem::zeroed() };
+            let parent_visible =
+                unsafe { libc::syscall(libc::SYS_fstat, parent_fd, &raw mut observed_parent_stat) }
+                    == 0;
+            let ok = !parent_visible
+                || observed_parent_stat.st_dev as u64 != parent_dev
+                || observed_parent_stat.st_ino as u64 != parent_ino;
+            let child_flags =
+                unsafe { libc::syscall(libc::SYS_fcntl, flag_probe[1], libc::F_GETFD) };
+            let ok = ok && child_flags >= 0 && child_flags & libc::FD_CLOEXEC as libc::c_long != 0;
+            let _ = super::raw_write_all(sockets[1], &[u8::from(ok)]);
+            unsafe { libc::_exit(if ok { 0 } else { 13 }) };
+        }
+
+        let mut detached = [0_u8; 1];
+        super::read_exact_raw(sockets[0], &mut detached).unwrap();
+        assert_eq!(detached[0], super::HANDSHAKE_DETACHED);
+        assert_ne!(
+            unsafe { libc::fcntl(flag_probe[0], libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0,
+            "the child's descriptor-flag change reached the parent table"
+        );
+        unsafe { libc::close(sockets[1]) };
+        let mut child_identity = [0_u8; 20];
+        super::read_exact_raw(sockets[0], &mut child_identity).unwrap();
+        let child_fd = i32::from_ne_bytes(child_identity[..4].try_into().unwrap());
+        let child_dev = u64::from_ne_bytes(child_identity[4..12].try_into().unwrap());
+        let child_ino = u64::from_ne_bytes(child_identity[12..].try_into().unwrap());
+        let mut observed_child_stat: libc::stat = unsafe { std::mem::zeroed() };
+        let child_visible = unsafe { libc::fstat(child_fd, &raw mut observed_child_stat) } == 0;
+        assert!(
+            !child_visible
+                || observed_child_stat.st_dev as u64 != child_dev
+                || observed_child_stat.st_ino as u64 != child_ino,
+            "the child's newly opened file reached the parent table"
+        );
+
+        let parent_fd = unsafe {
+            libc::syscall(
+                libc::SYS_memfd_create,
+                c"nono-parent-private".as_ptr(),
+                libc::MFD_CLOEXEC,
+            ) as i32
+        };
+        assert!(parent_fd >= 0);
+        let mut parent_stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(parent_fd, &raw mut parent_stat) }, 0);
+        let mut parent_identity = [0_u8; 20];
+        parent_identity[..4].copy_from_slice(&parent_fd.to_ne_bytes());
+        parent_identity[4..12].copy_from_slice(&(parent_stat.st_dev as u64).to_ne_bytes());
+        parent_identity[12..].copy_from_slice(&(parent_stat.st_ino as u64).to_ne_bytes());
+        assert_eq!(unsafe { libc::fcntl(flag_probe[1], libc::F_SETFD, 0) }, 0);
+        super::write_all_raw(sockets[0], &parent_identity).unwrap();
+        let mut result = [0_u8; 1];
+        super::read_exact_raw(sockets[0], &mut result).unwrap();
+        assert_eq!(result[0], 1);
+
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid as i32, &mut status, 0) },
+            pid as i32
+        );
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+        unsafe {
+            libc::close(parent_fd);
+            libc::close(sockets[0]);
+            libc::close(flag_probe[0]);
+            libc::close(flag_probe[1]);
+        }
+    }
+
+    #[cfg(all(target_os = "linux", debug_assertions))]
+    #[test]
+    fn raw_clone_allocator_guard_terminates_allocating_child() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            crate::arm_raw_clone_allocator_guard();
+            let allocation = vec![0_u8; 4096];
+            std::hint::black_box(allocation);
+            unsafe { libc::_exit(1) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 125);
     }
 }
