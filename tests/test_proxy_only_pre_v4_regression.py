@@ -384,6 +384,7 @@ def test_proxy_only_exec_does_not_deadlock_on_pre_v4(_abi_shim, tmp_path) -> Non
 
     env = dict(os.environ)
     env["LD_PRELOAD"] = _abi_shim
+    env["NONO_PY_PROXY_HANDOFF"] = "clone_files"
 
     try:
         proc = subprocess.run(  # noqa: S603
@@ -442,6 +443,7 @@ def test_pre_v4_bootstraps_survive_fd_churn_and_signals(_abi_shim, tmp_path) -> 
 
     env = dict(os.environ)
     env["LD_PRELOAD"] = _abi_shim
+    env["NONO_PY_PROXY_HANDOFF"] = "clone_files"
 
     try:
         proc = subprocess.run(  # noqa: S603
@@ -482,6 +484,7 @@ def test_pre_v4_bootstrap_failures_do_not_leak_listeners(_abi_shim, tmp_path) ->
 
     env = dict(os.environ)
     env["LD_PRELOAD"] = _abi_shim
+    env["NONO_PY_PROXY_HANDOFF"] = "clone_files"
 
     try:
         proc = subprocess.run(  # noqa: S603

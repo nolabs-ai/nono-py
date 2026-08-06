@@ -675,9 +675,18 @@ fn create_proxy_supervisor_pair(
         return Ok(None);
     }
 
-    nono::SupervisorSocket::pair()
-        .map(Some)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create proxy supervisor: {}", e)))
+    let pair = nono::SupervisorSocket::pair().map_err(|e| {
+        PyRuntimeError::new_err(format!("Failed to create proxy supervisor: {}", e))
+    })?;
+    set_cloexec(pair.0.as_raw_fd())
+        .and_then(|_| set_cloexec(pair.1.as_raw_fd()))
+        .map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "Failed to protect proxy supervisor descriptors: {}",
+                e
+            ))
+        })?;
+    Ok(Some(pair))
 }
 
 /// Build child environment CStrings.
@@ -1133,7 +1142,7 @@ fn do_clone_files_sandbox_exec(
     drop(ctx.prepared_landlock.take());
     drop(ctx.prepared_proxy_filter.take());
 
-    if let Err(error) = validate_seccomp_notify_fd(listener) {
+    if let Err(error) = validate_seccomp_notify_fd(listener, &listener_snapshot) {
         cleanup_failed_shared_bootstrap(
             child_pid,
             Some(listener),
@@ -1436,7 +1445,14 @@ fn seccomp_notify_fds() -> IoResult<BTreeSet<i32>> {
 }
 
 #[cfg(target_os = "linux")]
-fn validate_seccomp_notify_fd(fd: i32) -> PyResult<()> {
+fn validate_seccomp_notify_fd(fd: i32, listener_snapshot: &BTreeSet<i32>) -> PyResult<()> {
+    if listener_snapshot.contains(&fd) {
+        return Err(PyRuntimeError::new_err(format!(
+            "child reported pre-existing seccomp listener slot {}",
+            fd
+        )));
+    }
+
     let target = std::fs::read_link(format!("/proc/self/fd/{}", fd)).map_err(|e| {
         PyRuntimeError::new_err(format!(
             "cannot inspect proxy listener slot {} after DETACHED: {}",
@@ -1479,7 +1495,9 @@ fn cleanup_failed_shared_bootstrap(
         .difference(listener_snapshot)
         .copied()
         .collect::<BTreeSet<_>>();
-    if let Some(fd) = known_listener {
+    if let Some(fd) = known_listener
+        && !listener_snapshot.contains(&fd)
+    {
         to_close.insert(fd);
     }
     for fd in to_close {
