@@ -546,6 +546,12 @@ impl SessionMetadata {
                             "phantom_query" => {
                                 Ok(nono::undo::NetworkAuditAuthMechanism::PhantomQuery)
                             }
+                            "spiffe_jwt_bearer" => {
+                                Ok(nono::undo::NetworkAuditAuthMechanism::SpiffeJwtBearer)
+                            }
+                            "spiffe_oauth_assertion" => {
+                                Ok(nono::undo::NetworkAuditAuthMechanism::SpiffeOAuthAssertion)
+                            }
                             other => Err(PyValueError::new_err(format!(
                                 "invalid auth_mechanism: {}",
                                 other
@@ -576,6 +582,7 @@ impl SessionMetadata {
                             "query_param" => Ok(nono::undo::NetworkAuditInjectionMode::QueryParam),
                             "basic_auth" => Ok(nono::undo::NetworkAuditInjectionMode::BasicAuth),
                             "oauth2" => Ok(nono::undo::NetworkAuditInjectionMode::OAuth2),
+                            "spiffe_jwt" => Ok(nono::undo::NetworkAuditInjectionMode::SpiffeJwt),
                             other => Err(PyValueError::new_err(format!(
                                 "invalid injection_mode: {}",
                                 other
@@ -635,6 +642,7 @@ impl SessionMetadata {
                     credential_capture_header_names: None,
                     credential_capture_stdin_mode: None,
                     credential_capture_interactive: None,
+                    spiffe_context: None,
                 });
             }
             self.inner.network_events = rust_events;

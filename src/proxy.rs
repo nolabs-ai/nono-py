@@ -59,6 +59,8 @@ pub(crate) fn audit_event_to_py_dict<'py>(
             nono::undo::NetworkAuditAuthMechanism::PhantomHeader => "phantom_header",
             nono::undo::NetworkAuditAuthMechanism::PhantomPath => "phantom_path",
             nono::undo::NetworkAuditAuthMechanism::PhantomQuery => "phantom_query",
+            nono::undo::NetworkAuditAuthMechanism::SpiffeJwtBearer => "spiffe_jwt_bearer",
+            nono::undo::NetworkAuditAuthMechanism::SpiffeOAuthAssertion => "spiffe_oauth_assertion",
         }),
     )?;
     dict.set_item(
@@ -77,6 +79,7 @@ pub(crate) fn audit_event_to_py_dict<'py>(
             nono::undo::NetworkAuditInjectionMode::QueryParam => "query_param",
             nono::undo::NetworkAuditInjectionMode::BasicAuth => "basic_auth",
             nono::undo::NetworkAuditInjectionMode::OAuth2 => "oauth2",
+            nono::undo::NetworkAuditInjectionMode::SpiffeJwt => "spiffe_jwt",
         }),
     )?;
     dict.set_item(
@@ -238,6 +241,8 @@ impl RouteConfig {
                 tls_client_key,
                 endpoint_policy: None,
                 aws_auth: None,
+                spiffe: None,
+                rate_limit: None,
             },
         }
     }

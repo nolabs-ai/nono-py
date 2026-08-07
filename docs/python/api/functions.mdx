@@ -193,6 +193,7 @@ sandboxed_exec(
     env: list[tuple[str, str]] | None = None,
     inherit_env: bool = False,
     max_processes: int | None = None,
+    enforcement_mode: str = "auto",
 ) -> ExecResult
 ```
 
@@ -229,6 +230,13 @@ unsandboxed. The child receives only the capabilities in `caps`.
 <ParamField path="max_processes" type="int | None">
   Optional `RLIMIT_NPROC` value for the child. This is a per-real-UID kernel
   limit, not a per-sandbox process-tree limit.
+</ParamField>
+
+<ParamField path="enforcement_mode" type="str">
+  Linux rollout mode. For this compatibility release, `"auto"` retains the
+  Landlock-first behavior. `"seccomp"` layers a static network baseline under
+  Landlock, denying UDP, raw/non-IP sockets, and `io_uring_setup()` for
+  restricted policies. `"landlock"` explicitly selects Landlock only.
 </ParamField>
 
 **Returns:** `ExecResult` with `stdout`, `stderr`, and `exit_code`.
@@ -276,6 +284,16 @@ result = sandboxed_exec(
 
 Use cgroup `pids.max`, containers, or microVMs for reliable per-execution fork
 limits.
+
+### Linux Static Seccomp Baseline
+
+During this compatibility release, opt into the stronger network baseline with
+`enforcement_mode="seccomp"`. Plain `block_network()` then denies non-Unix
+sockets on every supported Linux kernel. Policies with TCP port exceptions use
+Landlock V4+ for the port allowlist while seccomp denies UDP and other socket
+families. The baseline also denies `io_uring_setup()`, including for workloads
+that use io_uring only for file I/O. A future release will make this the
+`"auto"` behavior.
 
 ---
 

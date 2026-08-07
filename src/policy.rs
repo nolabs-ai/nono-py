@@ -796,6 +796,8 @@ impl From<PolicyRouteConfig> for RustRouteConfig {
             tls_client_key: route.tls_client_key,
             endpoint_policy: None,
             aws_auth: None,
+            spiffe: None,
+            rate_limit: None,
         }
     }
 }
