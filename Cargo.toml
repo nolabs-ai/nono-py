@@ -1,9 +1,9 @@
 [package]
 name = "nono-py"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.95"
-authors = ["Luke Hinds <luke@alwaysfurther.ai>"]
+authors = ["Luke Hinds <luke@nolabs.ai>"]
 license = "Apache-2.0"
 description = "Python bindings for nono capability-based sandboxing library"
 publish = false
