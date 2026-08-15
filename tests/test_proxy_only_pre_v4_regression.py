@@ -1,4 +1,4 @@
-"""Regression test for the pre-Landlock-V4 proxy_only() exec deadlock.
+"""Regressions for the pre-Landlock-V4 proxy_only() execution path.
 
 On kernels without Landlock ABI V4 (< 6.7), proxy_only() enforcement falls back
 to a seccomp USER_NOTIF filter. nono >= 0.67 traps sendmsg in that filter, which
@@ -6,6 +6,11 @@ once deadlocked sandboxed_exec(): the child handed the notify fd to the parent
 via an SCM_RIGHTS sendmsg that the filter itself trapped. The current handoff
 uses a short CLONE_FILES bootstrap, detaches the child's fd table, and completes
 an ownership barrier without pidfd_getfd.
+
+The prepared policy must also apply the same inode-type compatibility mask as
+``landlock::PathBeneath``. Without that mask, an ``allow_file()`` grant such as
+``/dev/null`` carries directory-only rights into ``landlock_add_rule()`` and
+fails with ``EINVAL`` before exec.
 
 This test forces the fallback path on any kernel by clamping the Landlock ABI
 probe to V2 with an LD_PRELOAD shim (the landlock crate probes via glibc's
@@ -99,6 +104,7 @@ _DRIVER_PY = textwrap.dedent(
     proxy = nono.start_proxy(nono.ProxyConfig(allowed_hosts=["example.com"]))
     caps = nono.CapabilitySet()
     caps.allow_path("/", nono.AccessMode.READ)  # enough to exec the interpreter
+    caps.allow_file("/dev/null", nono.AccessMode.READ_WRITE)
     caps.proxy_only(proxy)
     parent_fds_before = fd_snapshot()
 
@@ -372,12 +378,14 @@ def _abi_shim(tmp_path_factory) -> str:
 
 
 def test_proxy_only_exec_does_not_deadlock_on_pre_v4(_abi_shim, tmp_path) -> None:
-    """proxy_only() + sandboxed_exec() must complete on the seccomp fallback path.
+    """proxy_only() + allow_file() must execute on the seccomp fallback path.
 
     Before the fd-handoff fix this hung forever (child wedged in the trapped
-    sendmsg handshake before execve). The pass condition is simply: the call
-    returns within the wall-clock budget, the ABI clamp was in effect, and the
-    supervisor mediated the child (denied), without requiring pidfd_getfd.
+    sendmsg handshake before execve). Before the prepared-rule type fix it
+    returned 126 because Landlock rejected directory-only rights on /dev/null.
+    The pass condition is: the call returns within the wall-clock budget, the
+    ABI clamp was in effect, and the supervisor mediated the child (denied),
+    without requiring pidfd_getfd.
     """
     driver = tmp_path / "driver.py"
     driver.write_text(_DRIVER_PY)
@@ -410,6 +418,7 @@ def test_proxy_only_exec_does_not_deadlock_on_pre_v4(_abi_shim, tmp_path) -> Non
 
     result = next((ln for ln in lines if ln.startswith("PREV4:RESULT")), None)
     assert result is not None, f"driver produced no RESULT; output:\n{combined}"
+    assert "prepared sandbox apply failed" not in combined, combined
 
     assert "pidfd_getfd" not in combined
     assert "CAP_SYS_PTRACE" not in combined
