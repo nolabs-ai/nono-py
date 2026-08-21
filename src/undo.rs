@@ -314,6 +314,7 @@ impl SessionMetadata {
                 audit_event_count: 0,
                 audit_integrity: None,
                 audit_attestation: None,
+                command_policy_summary: None,
             },
         }
     }

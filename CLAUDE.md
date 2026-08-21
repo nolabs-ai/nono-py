@@ -71,7 +71,7 @@ uv run ty check python/                     # Type check (ty)
 
 ### Nono Dependency
 
-The nono library is pulled from crates.io (`nono = "0.67.0"`, `nono-proxy = "0.67.0"`).
+The nono library is pulled from crates.io (`nono = "0.74.0"`, `nono-proxy = "0.74.0"`).
 
 ## Conventions
 

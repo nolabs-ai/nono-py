@@ -101,6 +101,7 @@ pub(crate) fn audit_event_to_py_dict<'py>(
             nono::undo::NetworkAuditDenialCategory::ExternalProxyRejected => {
                 "external_proxy_rejected"
             }
+            nono::undo::NetworkAuditDenialCategory::UnsupportedUpgrade => "unsupported_upgrade",
         }),
     )?;
     Ok(dict)
@@ -243,6 +244,7 @@ impl RouteConfig {
                 aws_auth: None,
                 spiffe: None,
                 rate_limit: None,
+                upgrades: Vec::new(),
             },
         }
     }
