@@ -798,6 +798,7 @@ impl From<PolicyRouteConfig> for RustRouteConfig {
             aws_auth: None,
             spiffe: None,
             rate_limit: None,
+            upgrades: Vec::new(),
         }
     }
 }

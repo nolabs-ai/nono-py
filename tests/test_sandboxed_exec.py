@@ -13,7 +13,15 @@ import time
 import pytest
 from conftest import add_system_paths
 
-from nono_py import AccessMode, CapabilitySet, ExecResult, SandboxState, sandboxed_exec
+from nono_py import (
+    AccessMode,
+    CapabilitySet,
+    ExecResult,
+    ProxyConfig,
+    SandboxState,
+    sandboxed_exec,
+    start_proxy,
+)
 
 # errno values that indicate a sandbox (Landlock/seccomp) denial, as opposed to
 # an unrelated failure such as ECONNREFUSED or a routing error.
@@ -779,6 +787,38 @@ class TestSandboxedExecEnforcementMode:
                 ["echo", "x"],
                 cwd=str(temp_dir),
                 enforcement_mode=mode,
+            )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="landlock is Linux-only")
+class TestSandboxedExecLandlockProxyOnlyRejected:
+    """enforcement_mode='landlock' cannot service NetworkMode::ProxyOnly.
+
+    Proxy-only enforcement relies on the seccomp-notify supervisor (which
+    checks the destination IP) alongside Landlock's NetPort rule (which only
+    checks the port). Only the 'auto' and 'seccomp' paths install that
+    supervisor, so 'landlock' must reject proxy_only() up front instead of
+    silently under-enforcing (port-only, no IP check).
+    """
+
+    @pytest.fixture
+    def proxy(self):
+        p = start_proxy(ProxyConfig(allowed_hosts=["example.com"]))
+        yield p
+        p.shutdown()
+
+    def test_landlock_mode_rejects_proxy_only(self, temp_dir, proxy):
+        caps = CapabilitySet()
+        add_system_paths(caps)
+        caps.allow_path(str(temp_dir), AccessMode.READ_WRITE)
+        caps.proxy_only(proxy)
+
+        with pytest.raises(ValueError, match="enforcement_mode='landlock' cannot enforce"):
+            sandboxed_exec(
+                caps,
+                ["echo", "x"],
+                cwd=str(temp_dir),
+                enforcement_mode="landlock",
             )
 
 
